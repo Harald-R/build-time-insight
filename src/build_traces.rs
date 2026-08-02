@@ -1,3 +1,4 @@
+use log;
 use rayon::prelude::*;
 use serde::Deserialize;
 use serde_json::Value;
@@ -42,6 +43,7 @@ struct TraceTree {
 impl TraceTree {
     fn from(mut trace_events: Vec<TraceEventRaw>) -> Self {
         if trace_events.is_empty() {
+            log::trace!("Empty trace events");
             return Self::default();
         }
 
@@ -170,6 +172,7 @@ fn parse_traces(build_dir: &str) -> HashMap<String, TraceEventFileRaw> {
             return HashMap::new();
         }
     };
+    log::trace!("Found {} trace files", paths.len());
     paths
         .into_par_iter()
         .filter_map(|path| {
@@ -184,6 +187,7 @@ fn parse_traces(build_dir: &str) -> HashMap<String, TraceEventFileRaw> {
 
 pub fn collect_build_traces(build_dir: &str) -> Result<(), String> {
     let trace_event_files = parse_traces(build_dir);
+    log::trace!("Parsed {} trace files", trace_event_files.len());
 
     let traces: HashMap<String, TraceTree> = trace_event_files
         .into_par_iter()
