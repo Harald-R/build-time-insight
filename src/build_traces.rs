@@ -3,10 +3,19 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::{collections::HashMap, fs::File, io::BufReader, path::PathBuf};
 
-const OPT_MODULE: &str = "OptModule";
 const EXECUTE_COMPILER: &str = "ExecuteCompiler";
 const FRONTEND: &str = "Frontend";
 const BACKEND: &str = "Backend";
+const PARSE_DECL: &str = "ParseDeclarationOrFunctionDefinition";
+const PARSE_FUNCTION_DEF: &str = "ParseFunctionDefinition";
+const PARSE_CLASS: &str = "ParseClass";
+const INSTANTIATE_CLASS: &str = "InstantiateClass";
+const INSTANTIATE_FUNCTION: &str = "InstantiateFunction";
+const CODE_GEN_FUNCTION: &str = "CodeGen Function";
+const PERFORM_PENDING_INSTANTIATIONS: &str = "PerformPendingInstantiations";
+const OPTIMIZER: &str = "Optimizer";
+const CODE_GEN_PASSES: &str = "CodeGenPasses";
+const OPT_MODULE: &str = "OptModule";
 
 #[derive(Debug)]
 struct Trace {
@@ -16,7 +25,114 @@ struct Trace {
     backend_duration: i64,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Debug)]
+struct TraceNode {
+    id: usize,
+    trace: TraceEventRaw,
+    parent: Option<usize>,
+    children: Vec<usize>,
+}
+
+#[derive(Debug, Default)]
+struct TraceTree {
+    root: Option<usize>,
+    nodes: Vec<TraceNode>,
+}
+
+impl TraceTree {
+    fn from(mut trace_events: Vec<TraceEventRaw>) -> Self {
+        if trace_events.is_empty() {
+            return Self::default();
+        }
+
+        let execute_compiler_trace_pid = trace_events
+            .iter()
+            .find(|event| event.name == EXECUTE_COMPILER)
+            .map(|event| event.pid);
+
+        // Remove traces that do not have duration or that do not match the expected names
+        trace_events.retain(|event| {
+            if let Some(expected_pid) = execute_compiler_trace_pid {
+                if event.pid != expected_pid {
+                    return false;
+                }
+            }
+            event.dur.is_some()
+                && match event.name.as_str() {
+                    EXECUTE_COMPILER
+                    | FRONTEND
+                    | BACKEND
+                    | PARSE_DECL
+                    | PARSE_FUNCTION_DEF
+                    | PARSE_CLASS
+                    | INSTANTIATE_CLASS
+                    | INSTANTIATE_FUNCTION
+                    | CODE_GEN_FUNCTION
+                    | PERFORM_PENDING_INSTANTIATIONS
+                    | OPTIMIZER
+                    | CODE_GEN_PASSES
+                    | OPT_MODULE => true,
+                    _ => false,
+                }
+        });
+        // Sort the events by the start time. If they match, place the longest duration first
+        trace_events.sort_by(|a, b| a.ts.cmp(&b.ts).then_with(|| b.dur.cmp(&a.dur)));
+
+        let mut tree = Self::default();
+
+        // Initialize  nodes
+        for (id, trace) in trace_events.into_iter().enumerate() {
+            tree.nodes.push(TraceNode {
+                id,
+                trace,
+                parent: None,
+                children: Vec::new(),
+            });
+        }
+
+        // The longest, earliest span becomes the root
+        tree.root = Some(0);
+
+        // Connect parents to children
+        for i in 1..tree.nodes.len() {
+            let mut potential_parent_idx = (i - 1) as isize;
+            let current_trace = tree.nodes[i].trace.clone();
+            let mut found_parent = false;
+
+            // Search backwards for the closest parent that completely encloses this node
+            while potential_parent_idx >= 0 {
+                let p_idx = potential_parent_idx as usize;
+                if tree.nodes[p_idx].trace.encloses(&current_trace) {
+                    tree.nodes[i].parent = Some(p_idx);
+                    tree.nodes[p_idx].children.push(i);
+                    found_parent = true;
+                    break;
+                }
+                potential_parent_idx -= 1;
+            }
+
+            // In case no parent completely encloses it, fallback to root as parent
+            if !found_parent {
+                tree.nodes[i].parent = Some(0);
+                tree.nodes[0].children.push(i);
+            }
+        }
+
+        tree
+    }
+
+    fn print_tree(&self, node_id: usize, depth: usize) {
+        if let Some(node) = self.nodes.get(node_id) {
+            let indent = " ".repeat(depth);
+            println!("{}->{} ({})", indent, node.trace.name, node.trace.name);
+            for &child_id in &node.children {
+                self.print_tree(child_id, depth + 1);
+            }
+        }
+    }
+}
+
+#[derive(Deserialize, Debug, Clone)]
 struct TraceEventRaw {
     name: String,        // Name of the event
     cat: Option<String>, // Event categories
@@ -28,43 +144,21 @@ struct TraceEventRaw {
     args: Option<Value>, // Extra arguments
 }
 
+impl TraceEventRaw {
+    fn end_time(&self) -> Option<i64> {
+        Some(self.ts + self.dur?)
+    }
+
+    fn encloses(&self, other: &TraceEventRaw) -> bool {
+        self.ts <= other.ts && self.end_time() >= other.end_time()
+    }
+}
+
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 struct TraceEventFileRaw {
     trace_events: Vec<TraceEventRaw>,
     beginning_of_time: i64,
-}
-
-impl TraceEventFileRaw {
-    pub fn extract_trace(self) -> Trace {
-        let mut trace = Trace {
-            source_file: String::new(),
-            total_duration: 0,
-            frontend_duration: 0,
-            backend_duration: 0,
-        };
-        for event in self.trace_events {
-            if event.name == OPT_MODULE {
-                trace.source_file = match event.args {
-                    Some(args) => {
-                        if let Some(detail) = args.get("detail") {
-                            detail.to_string().trim_matches('"').to_string()
-                        } else {
-                            continue;
-                        }
-                    }
-                    None => continue,
-                };
-            } else if event.name == EXECUTE_COMPILER {
-                trace.total_duration += event.dur.unwrap_or(0);
-            } else if event.name == FRONTEND {
-                trace.frontend_duration += event.dur.unwrap_or(0);
-            } else if event.name == BACKEND {
-                trace.backend_duration += event.dur.unwrap_or(0);
-            }
-        }
-        trace
-    }
 }
 
 fn parse_traces(build_dir: &str) -> HashMap<String, TraceEventFileRaw> {
@@ -91,13 +185,18 @@ fn parse_traces(build_dir: &str) -> HashMap<String, TraceEventFileRaw> {
 pub fn collect_build_traces(build_dir: &str) -> Result<(), String> {
     let trace_event_files = parse_traces(build_dir);
 
-    let traces: HashMap<String, Trace> = trace_event_files
+    let traces: HashMap<String, TraceTree> = trace_event_files
         .into_par_iter()
         .filter_map(|trace_event_file| {
-            Some((trace_event_file.0, trace_event_file.1.extract_trace()))
+            Some((
+                trace_event_file.0,
+                TraceTree::from(trace_event_file.1.trace_events),
+            ))
         })
         .collect();
-    println!("Traces {:#?}", traces);
+    for trace in traces {
+        trace.1.print_tree(0, 0);
+    }
 
     Ok(())
 }
