@@ -18,16 +18,61 @@ const OPTIMIZER: &str = "Optimizer";
 const CODE_GEN_PASSES: &str = "CodeGenPasses";
 const OPT_MODULE: &str = "OptModule";
 
-#[derive(Debug)]
-struct Trace {
-    source_file: String,
-    total_duration: i64,
-    frontend_duration: i64,
-    backend_duration: i64,
+#[derive(Deserialize, Debug, Clone)]
+pub struct TraceEventRaw {
+    name: String,        // Name of the event
+    cat: Option<String>, // Event categories
+    ph: String,          // Event type (phase)
+    pid: i64,            // Process ID
+    tid: i64,            // Thread ID
+    ts: i64,             // Event timestamp (in us)
+    dur: Option<i64>,    // Event duration (in us)
+    args: Option<Value>, // Extra arguments
+}
+
+impl TraceEventRaw {
+    fn end_time(&self) -> Option<i64> {
+        Some(self.ts + self.dur?)
+    }
+
+    fn encloses(&self, other: &TraceEventRaw) -> bool {
+        self.ts <= other.ts && self.end_time() >= other.end_time()
+    }
+}
+
+#[derive(Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct TraceEventFileRaw {
+    trace_events: Vec<TraceEventRaw>,
+    beginning_of_time: i64,
+}
+
+fn parse_traces(build_dir: &str) -> HashMap<String, TraceEventFileRaw> {
+    let pattern = build_dir.to_owned() + "/**/*.cpp.json";
+    let paths: Vec<PathBuf> = match glob::glob(&pattern) {
+        Ok(paths) => paths.filter_map(|e| e.ok()).collect(),
+        Err(e) => {
+            eprintln!("Glob pattern error: {}", e);
+            return HashMap::new();
+        }
+    };
+    log::trace!("Found {} trace files", paths.len());
+    let parsed_traces: HashMap<String, TraceEventFileRaw> = paths
+        .into_par_iter()
+        .filter_map(|path| {
+            let path_str = path.to_str()?.to_string();
+            let file = File::open(&path).ok()?;
+            let reader = BufReader::new(file);
+            let trace = serde_json::from_reader(reader).ok()?;
+            Some((path_str, trace))
+        })
+        .collect();
+    log::trace!("Parsed {} trace files", parsed_traces.len());
+    return parsed_traces;
 }
 
 #[derive(Debug)]
-struct TraceNode {
+pub struct TraceNode {
     id: usize,
     trace: TraceEventRaw,
     parent: Option<usize>,
@@ -35,7 +80,7 @@ struct TraceNode {
 }
 
 #[derive(Debug, Default)]
-struct TraceTree {
+pub struct TraceTree {
     root: Option<usize>,
     nodes: Vec<TraceNode>,
 }
@@ -123,7 +168,7 @@ impl TraceTree {
         tree
     }
 
-    fn print_tree(&self, node_id: usize, depth: usize) {
+    pub fn print_tree(&self, node_id: usize, depth: usize) {
         if let Some(node) = self.nodes.get(node_id) {
             let indent = " ".repeat(depth);
             println!("{}->{} ({})", indent, node.trace.name, node.trace.name);
@@ -134,73 +179,39 @@ impl TraceTree {
     }
 }
 
-#[derive(Deserialize, Debug, Clone)]
-struct TraceEventRaw {
-    name: String,        // Name of the event
-    cat: Option<String>, // Event categories
-    ph: String,          // Event type (phase)
-    pid: i64,            // Process ID
-    tid: i64,            // Thread ID
-    ts: i64,             // Event timestamp (in us)
-    dur: Option<i64>,    // Event duration (in us)
-    args: Option<Value>, // Extra arguments
+#[derive(Debug)]
+pub struct FileTrace {
+    pub trace_file: String,
+    pub source_file: Option<String>,
+    pub trace_tree: TraceTree,
 }
 
-impl TraceEventRaw {
-    fn end_time(&self) -> Option<i64> {
-        Some(self.ts + self.dur?)
-    }
-
-    fn encloses(&self, other: &TraceEventRaw) -> bool {
-        self.ts <= other.ts && self.end_time() >= other.end_time()
-    }
-}
-
-#[derive(Deserialize, Debug)]
-#[serde(rename_all = "camelCase")]
-struct TraceEventFileRaw {
-    trace_events: Vec<TraceEventRaw>,
-    beginning_of_time: i64,
-}
-
-fn parse_traces(build_dir: &str) -> HashMap<String, TraceEventFileRaw> {
-    let pattern = build_dir.to_owned() + "/**/*.cpp.json";
-    let paths: Vec<PathBuf> = match glob::glob(&pattern) {
-        Ok(paths) => paths.filter_map(|e| e.ok()).collect(),
-        Err(e) => {
-            eprintln!("Glob pattern error: {}", e);
-            return HashMap::new();
-        }
-    };
-    log::trace!("Found {} trace files", paths.len());
-    paths
+pub fn collect_build_traces(build_dir: &str) -> Result<Vec<FileTrace>, String> {
+    let parsed_traces = parse_traces(build_dir);
+    let traces: Vec<FileTrace> = parsed_traces
         .into_par_iter()
-        .filter_map(|path| {
-            let path_str = path.to_str()?.to_string();
-            let file = File::open(&path).ok()?;
-            let reader = BufReader::new(file);
-            let trace = serde_json::from_reader(reader).ok()?;
-            Some((path_str, trace))
-        })
-        .collect()
-}
-
-pub fn collect_build_traces(build_dir: &str) -> Result<(), String> {
-    let trace_event_files = parse_traces(build_dir);
-    log::trace!("Parsed {} trace files", trace_event_files.len());
-
-    let traces: HashMap<String, TraceTree> = trace_event_files
-        .into_par_iter()
-        .filter_map(|trace_event_file| {
-            Some((
-                trace_event_file.0,
-                TraceTree::from(trace_event_file.1.trace_events),
-            ))
+        .filter_map(|parsed_trace| {
+            let source_file = parsed_trace
+                .1
+                .trace_events
+                .iter()
+                .find(|&event| event.name == OPT_MODULE)
+                .map(|event| match &event.args {
+                    Some(args) => {
+                        if let Some(detail) = args.get("detail") {
+                            detail.to_string().trim_matches('"').to_string()
+                        } else {
+                            String::new()
+                        }
+                    }
+                    None => String::new(),
+                }).unwrap_or(String::new());
+            Some(FileTrace {
+                trace_file: parsed_trace.0,
+                source_file: Some(source_file),
+                trace_tree: TraceTree::from(parsed_trace.1.trace_events),
+            })
         })
         .collect();
-    for trace in traces {
-        trace.1.print_tree(0, 0);
-    }
-
-    Ok(())
+    Ok(traces)
 }

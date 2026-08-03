@@ -1,5 +1,5 @@
-mod cli;
 mod build_traces;
+mod cli;
 
 fn main() {
     env_logger::init();
@@ -14,5 +14,7 @@ fn main() {
     println!("Build dir: {}", build_dir);
 
     let build_traces = build_traces::collect_build_traces(&build_dir);
-    println!("Build traces: {:?}", build_traces);
+    for trace in build_traces.unwrap() {
+        trace.trace_tree.print_tree(0, 0);
+    }
 }
