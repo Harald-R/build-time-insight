@@ -66,8 +66,8 @@ impl TraceTree {
                     EXECUTE_COMPILER
                     | FRONTEND
                     | BACKEND
-                    | PARSE_DECL
-                    | PARSE_FUNCTION_DEF
+                    | PARSE_DECL_OR_FN_DEF
+                    | PARSE_FN_DEF
                     | PARSE_CLASS
                     | INSTANTIATE_CLASS
                     | INSTANTIATE_FUNCTION
