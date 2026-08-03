@@ -1,51 +1,8 @@
 use log;
 use rayon::prelude::*;
-use serde::Deserialize;
-use serde_json::Value;
 use std::{collections::HashMap, fs::File, io::BufReader, path::PathBuf};
 
-const EXECUTE_COMPILER: &str = "ExecuteCompiler";
-const FRONTEND: &str = "Frontend";
-const BACKEND: &str = "Backend";
-const PARSE_DECL: &str = "ParseDeclarationOrFunctionDefinition";
-const PARSE_FUNCTION_DEF: &str = "ParseFunctionDefinition";
-const PARSE_CLASS: &str = "ParseClass";
-const INSTANTIATE_CLASS: &str = "InstantiateClass";
-const INSTANTIATE_FUNCTION: &str = "InstantiateFunction";
-const CODE_GEN_FUNCTION: &str = "CodeGen Function";
-const PERFORM_PENDING_INSTANTIATIONS: &str = "PerformPendingInstantiations";
-const OPTIMIZER: &str = "Optimizer";
-const CODE_GEN_PASSES: &str = "CodeGenPasses";
-const OPT_MODULE: &str = "OptModule";
-
-#[derive(Deserialize, Debug, Clone)]
-pub struct TraceEventRaw {
-    name: String,        // Name of the event
-    cat: Option<String>, // Event categories
-    ph: String,          // Event type (phase)
-    pid: i64,            // Process ID
-    tid: i64,            // Thread ID
-    ts: i64,             // Event timestamp (in us)
-    dur: Option<i64>,    // Event duration (in us)
-    args: Option<Value>, // Extra arguments
-}
-
-impl TraceEventRaw {
-    fn end_time(&self) -> Option<i64> {
-        Some(self.ts + self.dur?)
-    }
-
-    fn encloses(&self, other: &TraceEventRaw) -> bool {
-        self.ts <= other.ts && self.end_time() >= other.end_time()
-    }
-}
-
-#[derive(Deserialize, Debug)]
-#[serde(rename_all = "camelCase")]
-struct TraceEventFileRaw {
-    trace_events: Vec<TraceEventRaw>,
-    beginning_of_time: i64,
-}
+use crate::raw_trace::*;
 
 fn parse_traces(build_dir: &str) -> HashMap<String, TraceEventFileRaw> {
     let pattern = build_dir.to_owned() + "/**/*.cpp.json";
@@ -73,16 +30,16 @@ fn parse_traces(build_dir: &str) -> HashMap<String, TraceEventFileRaw> {
 
 #[derive(Debug)]
 pub struct TraceNode {
-    id: usize,
-    trace: TraceEventRaw,
-    parent: Option<usize>,
-    children: Vec<usize>,
+    pub id: usize,
+    pub trace: TraceEventRaw,
+    pub parent: Option<usize>,
+    pub children: Vec<usize>,
 }
 
 #[derive(Debug, Default)]
 pub struct TraceTree {
-    root: Option<usize>,
-    nodes: Vec<TraceNode>,
+    pub root: Option<usize>,
+    pub nodes: Vec<TraceNode>,
 }
 
 impl TraceTree {
@@ -205,7 +162,8 @@ pub fn collect_build_traces(build_dir: &str) -> Result<Vec<FileTrace>, String> {
                         }
                     }
                     None => String::new(),
-                }).unwrap_or(String::new());
+                })
+                .unwrap_or(String::new());
             Some(FileTrace {
                 trace_file: parsed_trace.0,
                 source_file: Some(source_file),
