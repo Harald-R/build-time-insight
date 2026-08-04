@@ -48,11 +48,13 @@ pub fn analyze(traces: Vec<FileTrace>) {
                         if let Some(detail) = args.get("detail") {
                             if let Some(header) = detail.as_str() {
                                 let header = header.splitn(2, ':').next().unwrap_or(header);
-                                analysis
-                                    .header_parse_duration
-                                    .entry(header.to_string())
-                                    .and_modify(|val| *val += duration)
-                                    .or_insert(duration);
+                                if header.ends_with(".h") || header.ends_with(".hpp") {
+                                    analysis
+                                        .header_parse_duration
+                                        .entry(header.to_string())
+                                        .and_modify(|val| *val += duration)
+                                        .or_insert(duration);
+                                }
                             }
                         }
                     }
@@ -77,5 +79,41 @@ pub fn analyze(traces: Vec<FileTrace>) {
             analysis.1.source_file,
             analysis.1.total_duration
         );
+    }
+
+    let mut header_total_duration: HashMap<String, i64> = HashMap::new();
+
+    println!("Per-file results:");
+    for analysis in per_file_analysis.iter() {
+        let sum_header_parse: i64 = analysis
+            .header_parse_duration
+            .iter()
+            .map(|item| {
+                let header = item.0;
+                let duration = item.1;
+                header_total_duration
+                    .entry(header.to_string())
+                    .and_modify(|val| *val += duration)
+                    .or_insert(*duration);
+                duration
+            })
+            .sum();
+        println!(
+            "{}: {} frontend, {} backend, {} total header parse",
+            analysis.source_file,
+            analysis.frontend_duration,
+            analysis.backend_duration,
+            sum_header_parse
+        );
+    }
+
+    println!("Longest headers to parse:");
+    let num_items = min(header_total_duration.len(), 10);
+    let top_k: Vec<(&String, &i64)> = header_total_duration
+        .iter()
+        .k_largest_by(num_items, |a, b| a.1.cmp(&b.1))
+        .collect();
+    for header in top_k.iter().enumerate() {
+        println!("{}. {}: {} us", header.0 + 1, header.1.0, header.1.1);
     }
 }
