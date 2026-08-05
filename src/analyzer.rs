@@ -8,24 +8,87 @@ use crate::build_traces::FileTrace;
 use crate::raw_trace::*;
 
 #[derive(Debug)]
-pub struct Analysis {
-    source_file: String,
-    total_duration: i64,
-    frontend_duration: i64,
-    backend_duration: i64,
-    header_parse_duration: HashMap<String, i64>,
+pub struct UnitAnalysis {
+    pub total_duration: i64,
+    pub frontend_duration: i64,
+    pub backend_duration: i64,
+    pub header_parse_duration: HashMap<String, i64>,
 }
 
-pub fn analyze(traces: Vec<FileTrace>) {
-    let per_file_analysis: Vec<Analysis> = traces
+#[derive(Debug)]
+pub struct HeaderAnalysis {
+    pub parse_duration: i64,
+    pub num_inclusions: i64,
+    // TODO: Inclusion paths
+}
+
+#[derive(Debug)]
+pub struct AnalysisResult {
+    pub unit_analysis: HashMap<String, UnitAnalysis>,
+    pub header_analysis: HashMap<String, HeaderAnalysis>,
+}
+
+impl AnalysisResult {
+    pub fn from(unit_analysis: HashMap<String, UnitAnalysis>) -> Self {
+        let header_analysis = Self::get_per_header_analysis(&unit_analysis);
+        AnalysisResult {
+            unit_analysis,
+            header_analysis,
+        }
+    }
+
+    fn get_per_header_analysis(
+        per_unit_analysis: &HashMap<String, UnitAnalysis>,
+    ) -> HashMap<String, HeaderAnalysis> {
+        let mut header_analysis: HashMap<String, HeaderAnalysis> = HashMap::new();
+        for analysis in per_unit_analysis.iter() {
+            for (header, duration) in analysis.1.header_parse_duration.iter() {
+                header_analysis
+                    .entry(header.to_string())
+                    .and_modify(|val| {
+                        val.parse_duration += duration;
+                        val.num_inclusions += 1
+                    })
+                    .or_insert(HeaderAnalysis {
+                        parse_duration: *duration,
+                        num_inclusions: 1,
+                    });
+            }
+        }
+        header_analysis
+    }
+
+    pub fn longest_unit_compilations(
+        &self,
+        num_items: usize,
+    ) -> impl Iterator<Item = (&String, &UnitAnalysis)> {
+        let num_items = min(self.unit_analysis.len(), num_items);
+        self.unit_analysis.iter().k_largest_by(num_items, |a, b| {
+            a.1.total_duration.cmp(&b.1.total_duration)
+        })
+    }
+
+    pub fn longest_headers_parse_duration(
+        &self,
+        num_items: usize,
+    ) -> impl Iterator<Item = (&String, &HeaderAnalysis)> {
+        let num_items = min(self.header_analysis.len(), num_items);
+        self.header_analysis.iter().k_largest_by(num_items, |a, b| {
+            a.1.parse_duration.cmp(&b.1.parse_duration)
+        })
+    }
+}
+
+pub fn analyze(traces: Vec<FileTrace>) -> AnalysisResult {
+    let unit_analysis: HashMap<String, UnitAnalysis> = traces
         .par_iter()
         .map(|trace| {
-            let mut analysis = Analysis {
-                source_file: trace
-                    .source_file
-                    .as_deref()
-                    .unwrap_or(&trace.trace_file)
-                    .to_string(),
+            let source_file = trace
+                .source_file
+                .as_deref()
+                .unwrap_or(&trace.trace_file)
+                .to_string();
+            let mut analysis = UnitAnalysis {
                 total_duration: 0,
                 frontend_duration: 0,
                 backend_duration: 0,
@@ -60,60 +123,8 @@ pub fn analyze(traces: Vec<FileTrace>) {
                     }
                 }
             });
-            analysis
+            (source_file, analysis)
         })
         .collect();
-
-    println!("{:#?}", per_file_analysis);
-
-    let num_items = min(per_file_analysis.len(), 10);
-    let top_k: Vec<&Analysis> = per_file_analysis
-        .iter()
-        .k_largest_by(num_items, |a, b| a.total_duration.cmp(&b.total_duration))
-        .collect();
-    println!("Longest files to compile:");
-    for analysis in top_k.iter().enumerate() {
-        println!(
-            "{}. {}: {} us",
-            analysis.0 + 1,
-            analysis.1.source_file,
-            analysis.1.total_duration
-        );
-    }
-
-    let mut header_total_duration: HashMap<String, i64> = HashMap::new();
-
-    println!("Per-file results:");
-    for analysis in per_file_analysis.iter() {
-        let sum_header_parse: i64 = analysis
-            .header_parse_duration
-            .iter()
-            .map(|item| {
-                let header = item.0;
-                let duration = item.1;
-                header_total_duration
-                    .entry(header.to_string())
-                    .and_modify(|val| *val += duration)
-                    .or_insert(*duration);
-                duration
-            })
-            .sum();
-        println!(
-            "{}: {} frontend, {} backend, {} total header parse",
-            analysis.source_file,
-            analysis.frontend_duration,
-            analysis.backend_duration,
-            sum_header_parse
-        );
-    }
-
-    println!("Longest headers to parse:");
-    let num_items = min(header_total_duration.len(), 10);
-    let top_k: Vec<(&String, &i64)> = header_total_duration
-        .iter()
-        .k_largest_by(num_items, |a, b| a.1.cmp(&b.1))
-        .collect();
-    for header in top_k.iter().enumerate() {
-        println!("{}. {}: {} us", header.0 + 1, header.1.0, header.1.1);
-    }
+    AnalysisResult::from(unit_analysis)
 }
