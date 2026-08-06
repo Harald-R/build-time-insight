@@ -1,4 +1,5 @@
 mod analyzer;
+mod build_info;
 mod build_traces;
 mod cli;
 mod raw_trace;
@@ -14,6 +15,9 @@ fn main() {
         }
     };
     println!("Build dir: {}", build_dir);
+
+    let build_info = build_info::extract_build_info(&build_dir);
+    println!("Build info: {:#?}", build_info);
 
     let analysis_result = match build_traces::collect_build_traces(&build_dir) {
         Ok(traces) => analyzer::analyze(traces),
