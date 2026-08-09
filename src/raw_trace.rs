@@ -1,20 +1,13 @@
 use serde::Deserialize;
 use serde_json::Value;
 
-pub const EXECUTE_COMPILER: &str = "ExecuteCompiler";
-pub const FRONTEND: &str = "Frontend";
-pub const BACKEND: &str = "Backend";
+pub const TOTAL_EXECUTE_COMPILER: &str = "Total ExecuteCompiler";
+pub const TOTAL_FRONTEND: &str = "Total Frontend";
+pub const TOTAL_BACKEND: &str = "Total Backend";
 pub const PARSE_DECL_OR_FN_DEF: &str = "ParseDeclarationOrFunctionDefinition";
-pub const PARSE_FN_DEF: &str = "ParseFunctionDefinition";
-pub const PARSE_CLASS: &str = "ParseClass";
-pub const INSTANTIATE_CLASS: &str = "InstantiateClass";
-pub const INSTANTIATE_FUNCTION: &str = "InstantiateFunction";
-pub const CODE_GEN_FUNCTION: &str = "CodeGen Function";
-pub const PERFORM_PENDING_INSTANTIATIONS: &str = "PerformPendingInstantiations";
-pub const OPTIMIZER: &str = "Optimizer";
-pub const CODE_GEN_PASSES: &str = "CodeGenPasses";
 pub const OPT_MODULE: &str = "OptModule";
 pub const SOURCE: &str = "Source";
+pub const DETAIL: &str = "detail";
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct TraceEvent {

@@ -94,21 +94,53 @@ pub fn analyze(traces: Vec<FileTrace>) -> AnalysisResult {
                 backend_duration: 0,
                 header_parse_duration: HashMap::new(),
             };
+            let header_sources: Vec<(&String, &Vec<usize>)> = trace
+                .trace_tree
+                .roots
+                .iter()
+                .filter(|root| root.0 == SOURCE)
+                .collect();
+            for (_, roots) in header_sources {
+                for root_id in roots {
+                if let Some(node) = trace.trace_tree.nodes.get(*root_id) {
+                        let header_and_dur = node
+                            .trace
+                            .args
+                            .as_ref()
+                            .and_then(|args| args.get(DETAIL))
+                            .and_then(|detail| detail.as_str())
+                            .map(|header| header.splitn(2, ':').next().unwrap_or(header))
+                            .filter(|h| h.ends_with(".h") || h.ends_with(".hpp"))
+                            .map(|h| (h, node.trace.dur.unwrap_or(0)));
+                        if let Some((header, duration)) = header_and_dur {
+                            analysis
+                                .header_parse_duration
+                                .entry(header.to_string())
+                                .and_modify(|val| *val += duration)
+                                .or_insert(duration);
+                        }
+                    }
+                }
+            }
+            let headers_parsed = !analysis.header_parse_duration.is_empty();
+            if !headers_parsed {
+                log::info!("Headers parsing duration was not extracted from 'Sources' traces. Computing manually");
+            }
             trace.trace_tree.nodes.iter().for_each(|node| {
                 if node.trace.dur.is_none() {
                     return;
                 }
                 let duration = node.trace.dur.unwrap_or(0);
                 let name = &node.trace.name;
-                if name == EXECUTE_COMPILER {
-                    analysis.total_duration += duration;
-                } else if name == FRONTEND {
-                    analysis.frontend_duration += duration;
-                } else if name == BACKEND {
-                    analysis.backend_duration += duration;
-                } else if name == PARSE_DECL_OR_FN_DEF {
+                if name == TOTAL_EXECUTE_COMPILER {
+                    analysis.total_duration = duration;
+                } else if name == TOTAL_FRONTEND {
+                    analysis.frontend_duration = duration;
+                } else if name == TOTAL_BACKEND {
+                    analysis.backend_duration = duration;
+                } else if name == PARSE_DECL_OR_FN_DEF && !headers_parsed {
                     if let Some(args) = &node.trace.args {
-                        if let Some(detail) = args.get("detail") {
+                        if let Some(detail) = args.get(DETAIL) {
                             if let Some(header) = detail.as_str() {
                                 let header = header.splitn(2, ':').next().unwrap_or(header);
                                 if header.ends_with(".h") || header.ends_with(".hpp") {

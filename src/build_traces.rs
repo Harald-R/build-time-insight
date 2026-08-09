@@ -240,7 +240,7 @@ pub fn collect_build_traces(build_dir: &str) -> Result<Vec<FileTrace>, String> {
                 .find(|&event| event.name == OPT_MODULE)
                 .map(|event| match &event.args {
                     Some(args) => {
-                        if let Some(detail) = args.get("detail") {
+                        if let Some(detail) = args.get(DETAIL) {
                             detail.to_string().trim_matches('"').to_string()
                         } else {
                             String::new()
