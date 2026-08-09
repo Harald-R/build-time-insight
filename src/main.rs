@@ -20,7 +20,12 @@ fn main() {
     println!("Build info: {:#?}", build_info);
 
     let analysis_result = match build_traces::collect_build_traces(&build_dir) {
-        Ok(traces) => analyzer::analyze(traces),
+        Ok(traces) => {
+            for t in &traces {
+                t.trace_tree.print_tree(0);
+            }
+            analyzer::analyze(traces)
+        }
         Err(e) => {
             eprintln!("Error: {}", e);
             std::process::exit(1);
