@@ -1,7 +1,7 @@
-use itertools::Itertools;
 use log;
 use rayon::prelude::*;
-use std::{collections::HashMap, fs::File, hash::Hash, io::BufReader, path::PathBuf};
+use rustc_hash::{FxHashMap, FxHashSet};
+use std::{collections::HashMap, fs::File, io::BufReader, path::PathBuf};
 
 use crate::raw_trace::*;
 
@@ -41,76 +41,82 @@ pub struct TraceNode {
 
 #[derive(Debug, Default)]
 pub struct TraceTree {
-    // There is one root for each PID found (key PID, value node ID)
-    pub roots: HashMap<String, NodeId>,
+    // There can be multiple roots for each category found (key PID, value node IDs)
+    pub roots: FxHashMap<String, Vec<NodeId>>,
     pub nodes: Vec<TraceNode>,
 }
 
 // Fuse async events of type "b" (begin) and "e" (end) into a single "X" (complete) event
 fn fuse_async_trace_events(events: &mut Vec<TraceEvent>) {
     // Map tracking: (cat, id) -> index within the vector
-    let mut pending_indices: HashMap<(Option<String>, i64), usize> = HashMap::new();
-    // Track indices of "e" events that need to be deleted
-    let mut indices_to_remove = Vec::new();
+    let mut pending_indices: FxHashMap<(Option<&str>, i64), usize> =
+        FxHashMap::with_capacity_and_hasher(events.len() / 2, Default::default());
+    let mut mutations = Vec::with_capacity(events.len() / 4);
+    let mut indices_to_remove =
+        FxHashSet::with_capacity_and_hasher(events.len() / 2, Default::default());
 
     for i in 0..events.len() {
         let ph = events[i].ph.as_str();
 
         if ph == "b" {
             if let Some(id) = events[i].id {
-                let key = (events[i].cat.clone(), id);
+                let key = (events[i].cat.as_deref(), id);
                 pending_indices.insert(key, i);
             }
         } else if ph == "e" {
-            if let Some(ref id) = events[i].id {
-                let key = (events[i].cat.clone(), id.clone());
+            if let Some(id) = events[i].id {
+                let key = (events[i].cat.as_deref(), id);
 
                 if let Some(start_idx) = pending_indices.remove(&key) {
                     let end_ts = events[i].ts;
-
-                    // Mutate the original "b" event into an "X" event
-                    let start_event = &mut events[start_idx];
-                    start_event.ph = "X".to_string();
-                    start_event.dur = Some(end_ts.saturating_sub(start_event.ts));
-
-                    // Flag the current "e" event index for deletion
-                    indices_to_remove.push(i);
+                    mutations.push((start_idx, end_ts));
+                    indices_to_remove.insert(i);
                 }
             }
         }
     }
 
-    for &idx in indices_to_remove.iter().rev() {
-        events.remove(idx);
+    for (start_idx, end_ts) in mutations {
+        let start_event = &mut events[start_idx];
+        start_event.ph = "X".to_string();
+        start_event.dur = Some(end_ts.saturating_sub(start_event.ts));
     }
+
+    let mut current_idx = 0;
+    events.retain(|_| {
+        let keep = !indices_to_remove.contains(&current_idx);
+        current_idx += 1;
+        keep
+    });
 }
 
 impl TraceTree {
-    fn from(mut trace_events: Vec<TraceEvent>) -> Self {
+    pub fn from(mut trace_events: Vec<TraceEvent>) -> Self {
         if trace_events.is_empty() {
             log::trace!("Empty trace events");
             return Self::default();
         }
 
+        // Combine matching separate begin "b" and end "e" events into single duration "X" events
         fuse_async_trace_events(&mut trace_events);
 
-        // Sort the events by the category, then by process ID, then by the start time and then by the duration
+        // Group sequentially by thread (cat -> pid -> tid) then sort chronologically (ts)
+        // with longest durations (dur) first to ensure parents precede children
         trace_events.sort_by(|a, b| {
             a.cat.cmp(&b.cat).then_with(|| {
-                a.pid
-                    .cmp(&b.pid)
-                    .then_with(|| a.ts.cmp(&b.ts).then_with(|| b.dur.cmp(&a.dur)))
+                a.pid.cmp(&b.pid).then_with(|| {
+                    a.tid
+                        .cmp(&b.tid)
+                        .then_with(|| a.ts.cmp(&b.ts).then_with(|| b.dur.cmp(&a.dur)))
+                })
             })
         });
 
-        let mut tree = Self::default();
+        let mut tree = TraceTree {
+            roots: FxHashMap::default(),
+            nodes: Vec::with_capacity(trace_events.len()),
+        };
 
-        // Map to keep track of category root node indices by category name
-        let mut category_roots: HashMap<String, usize> = HashMap::new();
-        // Map to keep track of PID roots within each category: (category, pid) -> node_index
-        let mut pid_roots: HashMap<(String, i64), usize> = HashMap::new();
-
-        // Initialize  nodes
         for (id, trace) in trace_events.into_iter().enumerate() {
             tree.nodes.push(TraceNode {
                 id,
@@ -120,64 +126,68 @@ impl TraceTree {
             });
         }
 
-        // Connect parents to children. Each category will represent a different root, and each PID will have its own subtree
-        for i in 1..tree.nodes.len() {
-            let current_cat = tree.nodes[i].trace.cat.as_deref().unwrap_or("").to_string();
+        // Key is (category, pid, tid) to isolate call stacks by exact execution threads
+        type ThreadKey<'a> = (Option<&'a str>, i64, i64);
+        let mut thread_lanes: FxHashMap<ThreadKey, Vec<usize>> = FxHashMap::default();
+
+        // Stores (child_idx, parent_idx) relationships
+        let mut parent_child_links = Vec::with_capacity(tree.nodes.len());
+
+        for i in 0..tree.nodes.len() {
+            let is_metadata = tree.nodes[i].trace.ph == "M";
+
+            let current_cat_str = tree.nodes[i].trace.cat.as_deref();
             let current_pid = tree.nodes[i].trace.pid;
-            let current_trace = tree.nodes[i].trace.clone();
+            let current_tid = tree.nodes[i].trace.tid;
 
-            let mut potential_parent_idx = (i as isize) - 1;
+            let key: ThreadKey = (current_cat_str, current_pid, current_tid);
+            let active_stack = thread_lanes.entry(key).or_insert_with(Vec::new);
+
             let mut found_parent = false;
+            let mut matched_p_idx = 0;
+            let current_ts = tree.nodes[i].trace.ts;
 
-            // Search backwards for the closest parent with the same PID that encloses this node
-            while potential_parent_idx >= 0 {
-                let p_idx = potential_parent_idx as usize;
-                let parent_node = &tree.nodes[p_idx];
-                let parent_cat = parent_node.trace.cat.as_deref().unwrap_or("").to_string();
+            // Prune expired scopes from the stack and search backwards for an enclosing parent
+            while let Some(&p_idx) = active_stack.last() {
+                let parent_trace = &tree.nodes[p_idx].trace;
+                let parent_end = parent_trace.ts + parent_trace.dur.unwrap_or(0);
 
-                if parent_cat == current_cat
-                    && parent_node.trace.pid == current_pid
-                    && parent_node.trace.encloses(&current_trace)
-                {
-                    tree.nodes[i].parent = Some(p_idx);
-                    found_parent = true;
+                if current_ts < parent_end {
+                    // Current parent is still alive. Check if it encloses the node
+                    if parent_trace.encloses(&tree.nodes[i].trace) {
+                        matched_p_idx = p_idx;
+                        found_parent = true;
+                    }
                     break;
                 }
-                potential_parent_idx -= 1;
+                // Sibling or past parent interval has completely expired, drop it from the stack
+                active_stack.pop();
             }
 
             if found_parent {
-                if let Some(p_idx) = tree.nodes[i].parent {
-                    tree.nodes[p_idx].children.push(i);
-                }
-            } else {
-                // No enclosing parent found. This node is a root for its PID within this category.
-                let cat_root_idx = if let Some(&c_idx) = category_roots.get(&current_cat) {
-                    c_idx
-                } else {
-                    category_roots.insert(current_cat.clone(), i);
-                    tree.roots.insert(current_cat.clone(), i);
-                    i
-                };
-
-                if cat_root_idx == i {
-                    // This node itself became the category root
-                    continue;
-                }
-
-                // Check if a PID subtree root already exists under this category
-                if let Some(&p_root_idx) = pid_roots.get(&(current_cat.clone(), current_pid)) {
-                    tree.nodes[i].parent = Some(p_root_idx);
-                    tree.nodes[p_root_idx].children.push(i);
-                } else {
-                    // First node seen with this PID under this category becomes the PID root
-                    pid_roots.insert((current_cat, current_pid), i);
-
-                    // Connect this PID root to the Category root
-                    tree.nodes[i].parent = Some(cat_root_idx);
-                    tree.nodes[cat_root_idx].children.push(i);
-                }
+                parent_child_links.push((i, matched_p_idx));
             }
+
+            // Only register this event as a parent if it has a real structural duration container
+            let can_be_parent = !is_metadata && tree.nodes[i].trace.dur.map_or(false, |d| d > 0);
+            if can_be_parent {
+                active_stack.push(i);
+            }
+
+            // If the node has a structural parent inside its lane, we skip root assignment
+            if found_parent {
+                continue;
+            }
+
+            // Node is not enclosed by any other event; it becomes a root in its category
+            let root_name = current_cat_str.unwrap_or("").to_string();
+            tree.roots.entry(root_name).or_insert_with(Vec::new).push(i);
+        }
+
+        // Apply parents and populate children arrays
+        for (child_idx, parent_idx) in parent_child_links {
+            tree.nodes[child_idx].parent = Some(parent_idx);
+            tree.nodes[parent_idx].children.push(child_idx);
         }
 
         tree
@@ -187,7 +197,8 @@ impl TraceTree {
         if let Some(node) = self.nodes.get(node_id) {
             let indent = " ".repeat(depth);
             println!(
-                "{}->{} {}->{}us ({:?})",
+                "{}{}->{} {}->{}us ({:?})",
+                depth,
                 indent,
                 node.trace.name,
                 node.trace.ts,
@@ -201,9 +212,11 @@ impl TraceTree {
     }
 
     pub fn print_tree(&self, depth: usize) {
-        for (cat, &root_id) in self.roots.iter() {
+        for (cat, roots) in self.roots.iter() {
             println!("Category '{cat}'");
-            self.print_children(root_id, depth);
+            for root_id in roots {
+                self.print_children(*root_id, depth);
+            }
         }
     }
 }

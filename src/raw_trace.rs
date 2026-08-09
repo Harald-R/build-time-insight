@@ -30,12 +30,11 @@ pub struct TraceEvent {
 }
 
 impl TraceEvent {
-    pub fn end_time(&self) -> Option<i64> {
-        Some(self.ts + self.dur?)
-    }
-
-    pub fn encloses(&self, other: &TraceEvent) -> bool {
-        self.ts <= other.ts && self.end_time() >= other.end_time()
+    #[inline]
+    pub fn encloses(&self, other: &Self) -> bool {
+        let self_dur = self.dur.unwrap_or(0);
+        let other_dur = other.dur.unwrap_or(0);
+        self.ts <= other.ts && (self.ts + self_dur) >= (other.ts + other_dur)
     }
 }
 
