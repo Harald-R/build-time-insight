@@ -225,7 +225,7 @@ fn parse_compiler_cmake_file(cmake_files_dir: PathBuf, toolchain: &mut Toolchain
             }
         };
 
-        if key.contains("CMAKE_CXX_COMPILER_ID") {
+        if key == "CMAKE_CXX_COMPILER_ID" {
             log::trace!("Found CMAKE_CXX_COMPILER_ID = {}", val);
             toolchain.cxx_compiler.get_or_insert_default().name = val.to_string();
         } else if key == "CMAKE_CXX_COMPILER_VERSION" {
