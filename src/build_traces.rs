@@ -46,6 +46,16 @@ pub struct TraceTree {
     pub nodes: Vec<TraceNode>,
 }
 
+/// Control signal returned by your closure to guide the tree traversal loop
+pub enum LoopControl {
+    /// Continue down the tree normally
+    Continue,
+    /// Skip this node's children, but keep checking other branches/siblings
+    SkipChildren,
+    /// Abort the entire traversal immediately and return a value
+    Break,
+}
+
 // Fuse async events of type "b" (begin) and "e" (end) into a single "X" (complete) event
 fn fuse_async_trace_events(events: &mut Vec<TraceEvent>) {
     // Map tracking: (cat, id) -> index within the vector
@@ -191,6 +201,38 @@ impl TraceTree {
         }
 
         tree
+    }
+
+    pub fn traverse<F>(&self, mut f: F)
+    where
+        F: FnMut(&TraceNode) -> LoopControl,
+    {
+        let mut stack = Vec::new();
+
+        for root_ids in self.roots.values() {
+            for &root_id in root_ids.iter().rev() {
+                stack.push(root_id);
+            }
+        }
+
+        while let Some(node_id) = stack.pop() {
+            if let Some(node) = self.nodes.get(node_id) {
+                match f(node) {
+                    LoopControl::Break => {
+                        // Stop the traversal
+                    }
+                    LoopControl::SkipChildren => {
+                        // Skip pushing the children, so the loop moves straight to the next sibling in the stack
+                    }
+                    LoopControl::Continue => {
+                        // Push children in reverse order so the first child is popped next
+                        for &child_id in node.children.iter().rev() {
+                            stack.push(child_id);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     fn print_children(&self, node_id: usize, depth: usize) {

@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use itertools::Itertools;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 
-use crate::build_traces::FileTrace;
+use crate::build_traces::{FileTrace, LoopControl};
 use crate::raw_trace::*;
 
 #[derive(Debug)]
@@ -12,6 +12,7 @@ pub struct UnitAnalysis {
     pub total_duration: i64,
     pub frontend_duration: i64,
     pub backend_duration: i64,
+    pub template_instantiation_duration: i64,
     pub header_parse_duration: HashMap<String, i64>,
 }
 
@@ -92,6 +93,7 @@ pub fn analyze(traces: Vec<FileTrace>) -> AnalysisResult {
                 total_duration: 0,
                 frontend_duration: 0,
                 backend_duration: 0,
+                template_instantiation_duration: 0,
                 header_parse_duration: HashMap::new(),
             };
             let header_sources: Vec<(&String, &Vec<usize>)> = trace
@@ -126,19 +128,29 @@ pub fn analyze(traces: Vec<FileTrace>) -> AnalysisResult {
             if !headers_parsed {
                 log::info!("Headers parsing duration was not extracted from 'Sources' traces. Computing manually");
             }
-            trace.trace_tree.nodes.iter().for_each(|node| {
+            trace.trace_tree.traverse(|node| {
                 if node.trace.dur.is_none() {
-                    return;
+                    return LoopControl::Continue;
                 }
                 let duration = node.trace.dur.unwrap_or(0);
                 let name = &node.trace.name;
                 if name == TOTAL_EXECUTE_COMPILER {
                     analysis.total_duration = duration;
-                } else if name == TOTAL_FRONTEND {
+                    return LoopControl::SkipChildren;
+                }
+                if name == TOTAL_FRONTEND {
                     analysis.frontend_duration = duration;
-                } else if name == TOTAL_BACKEND {
+                    return LoopControl::SkipChildren;
+                }
+                if name == TOTAL_BACKEND {
                     analysis.backend_duration = duration;
-                } else if name == PARSE_DECL_OR_FN_DEF && !headers_parsed {
+                    return LoopControl::SkipChildren;
+                }
+                if name == INSTANTIATE_FUNCTION || name == INSTANTIATE_CLASS || name == PERFORM_PENDING_INSTANTIATIONS {
+                    analysis.template_instantiation_duration += duration;
+                    return LoopControl::SkipChildren;
+                }
+                if name == PARSE_DECL_OR_FN_DEF && !headers_parsed {
                     if let Some(args) = &node.trace.args {
                         if let Some(detail) = args.get(DETAIL) {
                             if let Some(header) = detail.as_str() {
@@ -153,8 +165,11 @@ pub fn analyze(traces: Vec<FileTrace>) -> AnalysisResult {
                             }
                         }
                     }
+                    return LoopControl::Continue;
                 }
-            });
+                return LoopControl::Continue;
+            }
+            );
             (source_file, analysis)
         })
         .collect();
