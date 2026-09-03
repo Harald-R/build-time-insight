@@ -55,4 +55,42 @@ fn main() {
             header.1.1.num_inclusions
         );
     }
+
+    println!("Largest template instantiations per translation unit:");
+    for (source, analysis) in &analysis_result.unit_analysis {
+        let function = analysis
+            .largest_function_template_instantiation()
+            .map(|(name, inst)| {
+                format!(
+                    "{} ({} us, {} instantiations)",
+                    name, inst.total_duration, inst.num_instantiations
+                )
+            })
+            .unwrap_or_else(|| "none".to_string());
+        let class = analysis
+            .largest_class_template_instantiation()
+            .map(|(name, inst)| {
+                format!(
+                    "{} ({} us, {} instantiations)",
+                    name, inst.total_duration, inst.num_instantiations
+                )
+            })
+            .unwrap_or_else(|| "none".to_string());
+        println!("{}: function: {}, class: {}", source, function, class);
+    }
+
+    println!("Largest template instantiations in the entire build:");
+    for (rank, (kind, name, inst)) in analysis_result
+        .longest_template_instantiations(10)
+        .enumerate()
+    {
+        println!(
+            "{}. {} template '{}': {} us ({} instantiations)",
+            rank + 1,
+            kind,
+            name,
+            inst.total_duration,
+            inst.num_instantiations
+        );
+    }
 }
