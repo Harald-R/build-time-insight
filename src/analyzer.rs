@@ -14,6 +14,7 @@ pub struct UnitAnalysis {
     pub backend_duration: i64,
     pub template_instantiation_duration: i64,
     pub header_parse_duration: HashMap<String, i64>,
+    pub header_inclusion_paths: HashMap<String, HashMap<String, i64>>,
     pub function_template_instantiations: HashMap<String, TemplateInstantiation>,
     pub class_template_instantiations: HashMap<String, TemplateInstantiation>,
 }
@@ -65,7 +66,7 @@ impl UnitAnalysis {
 pub struct HeaderAnalysis {
     pub parse_duration: i64,
     pub num_inclusions: i64,
-    // TODO: Inclusion paths
+    pub inclusion_paths: HashMap<String, i64>,
 }
 
 #[derive(Debug)]
@@ -153,7 +154,18 @@ impl AnalysisResult {
                     .or_insert(HeaderAnalysis {
                         parse_duration: *duration,
                         num_inclusions: 1,
+                        inclusion_paths: HashMap::new(),
                     });
+            }
+            for (header, chain_counts) in analysis.1.header_inclusion_paths.iter() {
+                if let Some(header_analysis) = header_analysis.get_mut(header) {
+                    for (chain, count) in chain_counts {
+                        *header_analysis
+                            .inclusion_paths
+                            .entry(chain.clone())
+                            .or_insert(0) += count;
+                    }
+                }
             }
         }
         header_analysis
@@ -195,6 +207,7 @@ pub fn analyze(traces: Vec<FileTrace>) -> AnalysisResult {
                 backend_duration: 0,
                 template_instantiation_duration: 0,
                 header_parse_duration: HashMap::new(),
+                header_inclusion_paths: HashMap::new(),
                 function_template_instantiations: HashMap::new(),
                 class_template_instantiations: HashMap::new(),
             };
@@ -317,6 +330,48 @@ pub fn analyze(traces: Vec<FileTrace>) -> AnalysisResult {
                 }
                 LoopControl::Continue
             });
+
+            // Collect inclusion paths for headers from the "Source" event tree.
+            // Clang emits a "Source" span (cat = "Source") for every entered file,
+            // nested inside the file that includes it. The chain from the root down
+            // to a header's "Source" node is therefore its full inclusion path.
+            // The top-level source file is dropped so that the same header-only
+            // chain (e.g. "a.h -> b.h") recurs across translation units and can be
+            // counted as the most-used inclusion chain for the header.
+            if let Some(source_root_ids) = trace.trace_tree.roots.get(SOURCE) {
+                let mut stack: Vec<(usize, Vec<String>)> = source_root_ids
+                    .iter()
+                    .map(|&id| (id, Vec::new()))
+                    .collect();
+                while let Some((node_id, mut chain)) = stack.pop() {
+                    let node = &trace.trace_tree.nodes[node_id];
+                    let file = node
+                        .trace
+                        .args
+                        .as_ref()
+                        .and_then(|args| args.get(DETAIL))
+                        .and_then(|detail| detail.as_str())
+                        .map(|f| f.splitn(2, ':').next().unwrap_or(f).to_string());
+                    if let Some(file) = file {
+                        chain.push(file.clone());
+                        if file.ends_with(".h") || file.ends_with(".hpp") {
+                            if chain.len() > 1 {
+                                let header_chain = chain[1..].join(" -> ");
+                                analysis
+                                    .header_inclusion_paths
+                                    .entry(file)
+                                    .or_insert_with(HashMap::new)
+                                    .entry(header_chain)
+                                    .and_modify(|count| *count += 1)
+                                    .or_insert(1);
+                            }
+                        }
+                    }
+                    for &child in &node.children {
+                        stack.push((child, chain.clone()));
+                    }
+                }
+            }
             (source_file, analysis)
         })
         .collect();

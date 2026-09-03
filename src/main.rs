@@ -47,13 +47,19 @@ fn main() {
         .longest_headers_parse_duration(10)
         .enumerate()
     {
+        let (name, analysis) = header.1;
         println!(
             "{}. {}: {} us (included {} times)",
             header.0 + 1,
-            header.1.0,
-            header.1.1.parse_duration,
-            header.1.1.num_inclusions
+            name,
+            analysis.parse_duration,
+            analysis.num_inclusions
         );
+        let mut chains: Vec<(&String, &i64)> = analysis.inclusion_paths.iter().collect();
+        chains.sort_by(|a, b| b.1.cmp(a.1));
+        for (chain, count) in chains.into_iter().take(5) {
+            println!("   via {} ({} times)", chain, count);
+        }
     }
 
     println!("Largest template instantiations per translation unit:");
