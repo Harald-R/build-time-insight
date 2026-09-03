@@ -1,5 +1,4 @@
 use serde::Deserialize;
-use serde_json::Value;
 
 pub const TOTAL_EXECUTE_COMPILER: &str = "Total ExecuteCompiler";
 pub const TOTAL_FRONTEND: &str = "Total Frontend";
@@ -10,7 +9,13 @@ pub const INSTANTIATE_CLASS: &str = "InstantiateClass";
 pub const PERFORM_PENDING_INSTANTIATIONS: &str = "PerformPendingInstantiations";
 pub const OPT_MODULE: &str = "OptModule";
 pub const SOURCE: &str = "Source";
-pub const DETAIL: &str = "detail";
+
+/// The subset of an event's `args` object that the tool consumes. Unknown
+/// keys are ignored, avoiding the cost of materializing the full JSON value.
+#[derive(Deserialize, Debug, Clone, Default)]
+pub struct TraceArgs {
+    pub detail: Option<String>,
+}
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct TraceEvent {
@@ -22,7 +27,8 @@ pub struct TraceEvent {
     pub id: Option<i64>,     // ID (used for async events)
     pub ts: i64,             // Event timestamp (in us)
     pub dur: Option<i64>,    // Event duration (in us)
-    pub args: Option<Value>, // Extra arguments
+    #[serde(default)]
+    pub args: Option<TraceArgs>, // Extra arguments (only the fields we use)
 }
 
 impl TraceEvent {

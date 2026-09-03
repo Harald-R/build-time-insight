@@ -224,8 +224,7 @@ pub fn analyze(traces: Vec<FileTrace>) -> AnalysisResult {
                             .trace
                             .args
                             .as_ref()
-                            .and_then(|args| args.get(DETAIL))
-                            .and_then(|detail| detail.as_str())
+                            .and_then(|args| args.detail.as_deref())
                             .map(|header| header.splitn(2, ':').next().unwrap_or(header))
                             .filter(|h| h.ends_with(".h") || h.ends_with(".hpp"))
                             .map(|h| (h, node.trace.dur.unwrap_or(0)));
@@ -287,8 +286,7 @@ pub fn analyze(traces: Vec<FileTrace>) -> AnalysisResult {
                         .trace
                         .args
                         .as_ref()
-                        .and_then(|args| args.get(DETAIL))
-                        .and_then(|detail| detail.as_str())
+                        .and_then(|args| args.detail.as_deref())
                     {
                         let instantiations = if name == INSTANTIATE_FUNCTION {
                             &mut analysis.function_template_instantiations
@@ -312,18 +310,19 @@ pub fn analyze(traces: Vec<FileTrace>) -> AnalysisResult {
                     return LoopControl::Continue;
                 }
                 if name == PARSE_DECL_OR_FN_DEF && !headers_parsed {
-                    if let Some(args) = &node.trace.args {
-                        if let Some(detail) = args.get(DETAIL) {
-                            if let Some(header) = detail.as_str() {
-                                let header = header.splitn(2, ':').next().unwrap_or(header);
-                                if header.ends_with(".h") || header.ends_with(".hpp") {
-                                    analysis
-                                        .header_parse_duration
-                                        .entry(header.to_string())
-                                        .and_modify(|val| *val += duration)
-                                        .or_insert(duration);
-                                }
-                            }
+                    if let Some(header) = node
+                        .trace
+                        .args
+                        .as_ref()
+                        .and_then(|args| args.detail.as_deref())
+                    {
+                        let header = header.splitn(2, ':').next().unwrap_or(header);
+                        if header.ends_with(".h") || header.ends_with(".hpp") {
+                            analysis
+                                .header_parse_duration
+                                .entry(header.to_string())
+                                .and_modify(|val| *val += duration)
+                                .or_insert(duration);
                         }
                     }
                     return LoopControl::Continue;
@@ -349,8 +348,7 @@ pub fn analyze(traces: Vec<FileTrace>) -> AnalysisResult {
                         .trace
                         .args
                         .as_ref()
-                        .and_then(|args| args.get(DETAIL))
-                        .and_then(|detail| detail.as_str())
+                        .and_then(|args| args.detail.as_deref())
                         .map(|f| f.splitn(2, ':').next().unwrap_or(f).to_string());
                     if let Some(file) = file {
                         chain.push(file.clone());

@@ -280,17 +280,9 @@ pub fn collect_build_traces(build_dir: &str) -> Result<Vec<FileTrace>, String> {
                 .trace_events
                 .iter()
                 .find(|&event| event.name == OPT_MODULE)
-                .map(|event| match &event.args {
-                    Some(args) => {
-                        if let Some(detail) = args.get(DETAIL) {
-                            detail.to_string().trim_matches('"').to_string()
-                        } else {
-                            String::new()
-                        }
-                    }
-                    None => String::new(),
-                })
-                .unwrap_or(String::new());
+                .and_then(|event| event.args.as_ref().and_then(|args| args.detail.as_deref()))
+                .unwrap_or("")
+                .to_string();
             Some(FileTrace {
                 trace_file: parsed_trace.0,
                 source_file: Some(source_file),
