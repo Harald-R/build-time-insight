@@ -1,8 +1,11 @@
+use crate::report::Report;
+
 mod analyzer;
 mod build_info;
 mod build_traces;
 mod cli;
 mod raw_trace;
+mod report;
 
 fn main() {
     env_logger::init();
@@ -99,4 +102,8 @@ fn main() {
             inst.num_instantiations
         );
     }
+
+    let report = Report::new(build_info,  analysis_result);
+    let path = std::env::temp_dir().join("report.msgpack");
+    report::write_report(&report, &path).unwrap();
 }

@@ -5,13 +5,15 @@ use std::{
     process::Command,
 };
 
-#[derive(Debug, Default)]
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Tool {
     pub name: String,
     pub version: String,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Toolchain {
     pub build_system: Option<Tool>, // e.g. CMake
     pub generator: Option<Tool>,    // e.g. Ninja
@@ -20,7 +22,7 @@ pub struct Toolchain {
     pub linker: Option<Tool>,       // e.g. lld
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct BuildInfo {
     pub toolchain: Option<Toolchain>,
     pub git_commit: Option<String>,

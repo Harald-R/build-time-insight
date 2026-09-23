@@ -3,23 +3,28 @@ use std::collections::HashMap;
 
 use itertools::Itertools;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+use serde::{Deserialize, Serialize};
 
 use crate::build_traces::{FileTrace, LoopControl, TraceNode};
 use crate::raw_trace::*;
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct UnitAnalysis {
     pub total_duration: i64,
     pub frontend_duration: i64,
     pub backend_duration: i64,
     pub template_instantiation_duration: i64,
+    #[serde(serialize_with = "crate::report::serialize_sorted_map")]
     pub header_parse_duration: HashMap<String, i64>,
+    #[serde(serialize_with = "crate::report::serialize_sorted_nested_map")]
     pub header_inclusion_paths: HashMap<String, HashMap<String, i64>>,
+    #[serde(serialize_with = "crate::report::serialize_sorted_map")]
     pub function_template_instantiations: HashMap<String, TemplateInstantiation>,
+    #[serde(serialize_with = "crate::report::serialize_sorted_map")]
     pub class_template_instantiations: HashMap<String, TemplateInstantiation>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TemplateInstantiation {
     pub total_duration: i64,
     pub num_instantiations: i64,
@@ -62,18 +67,23 @@ impl UnitAnalysis {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct HeaderAnalysis {
     pub parse_duration: i64,
     pub num_inclusions: i64,
+    #[serde(serialize_with = "crate::report::serialize_sorted_map")]
     pub inclusion_paths: HashMap<String, i64>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct AnalysisResult {
+    #[serde(serialize_with = "crate::report::serialize_sorted_map")]
     pub unit_analysis: HashMap<String, UnitAnalysis>,
+    #[serde(serialize_with = "crate::report::serialize_sorted_map")]
     pub header_analysis: HashMap<String, HeaderAnalysis>,
+    #[serde(serialize_with = "crate::report::serialize_sorted_map")]
     pub function_template_instantiations: HashMap<String, TemplateInstantiation>,
+    #[serde(serialize_with = "crate::report::serialize_sorted_map")]
     pub class_template_instantiations: HashMap<String, TemplateInstantiation>,
 }
 
