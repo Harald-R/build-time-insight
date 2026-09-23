@@ -1,11 +1,9 @@
-use crate::report::Report;
+use build_time_insight::report::{self, Report};
 
-mod analyzer;
-mod build_info;
-mod build_traces;
-mod cli;
-mod raw_trace;
-mod report;
+use build_time_insight::analyzer;
+use build_time_insight::build_info;
+use build_time_insight::build_traces;
+use build_time_insight::cli;
 
 fn main() {
     env_logger::init();
