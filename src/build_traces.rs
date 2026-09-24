@@ -364,19 +364,37 @@ mod tests {
 
     // Async "Source" begin event: category "Source", id 0, detail = included file
     fn source_begin(pid: i64, tid: i64, ts: i64, file: &str) -> TraceEvent {
-        trace_event("Source", Some("Source"), "b", pid, tid, Some(0), ts, None, Some(file))
+        trace_event(
+            "Source",
+            Some("Source"),
+            "b",
+            pid,
+            tid,
+            Some(0),
+            ts,
+            None,
+            Some(file),
+        )
     }
 
     // Async "Source" end event: category "Source", id 0, no args
     fn source_end(pid: i64, tid: i64, ts: i64) -> TraceEvent {
-        trace_event("Source", Some("Source"), "e", pid, tid, Some(0), ts, None, None)
+        trace_event(
+            "Source",
+            Some("Source"),
+            "e",
+            pid,
+            tid,
+            Some(0),
+            ts,
+            None,
+            None,
+        )
     }
 
     fn test_build_dir(label: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "build_time_insight_{label}_{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("build_time_insight_{label}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -473,7 +491,17 @@ mod tests {
     #[test]
     fn fuse_async_trace_events_ignores_events_without_id() {
         let mut events = vec![
-            trace_event("Source", Some("Source"), "b", 1, 1, None, 100, None, Some("a.h")),
+            trace_event(
+                "Source",
+                Some("Source"),
+                "b",
+                1,
+                1,
+                None,
+                100,
+                None,
+                Some("a.h"),
+            ),
             trace_event("Source", Some("Source"), "e", 1, 1, None, 200, None, None),
         ];
         fuse_async_trace_events(&mut events);
@@ -523,7 +551,10 @@ mod tests {
         assert_eq!(root.parent, None);
         assert_eq!(root.children, vec![1]);
 
-        assert_eq!(tree.nodes[1].trace.name, "ParseDeclarationOrFunctionDefinition");
+        assert_eq!(
+            tree.nodes[1].trace.name,
+            "ParseDeclarationOrFunctionDefinition"
+        );
         assert_eq!(tree.nodes[1].parent, Some(0));
         assert_eq!(tree.nodes[1].children, vec![2]);
 
@@ -568,10 +599,7 @@ mod tests {
 
     #[test]
     fn zero_duration_events_cannot_be_parents() {
-        let events = vec![
-            x_event("a", 1, 1, 0, 0),
-            x_event("b", 1, 1, 0, 0),
-        ];
+        let events = vec![x_event("a", 1, 1, 0, 0), x_event("b", 1, 1, 0, 0)];
         let tree = TraceTree::from(events);
         assert_eq!(tree.roots[""].len(), 2);
         assert!(tree.nodes.iter().all(|n| n.parent.is_none()));
@@ -612,10 +640,7 @@ mod tests {
 
     #[test]
     fn partially_overlapping_events_are_not_nested() {
-        let events = vec![
-            x_event("a", 1, 1, 0, 10),
-            x_event("b", 1, 1, 5, 10),
-        ];
+        let events = vec![x_event("a", 1, 1, 0, 10), x_event("b", 1, 1, 5, 10)];
         let tree = TraceTree::from(events);
         assert_eq!(tree.roots[""].len(), 2);
         assert!(tree.nodes.iter().all(|n| n.parent.is_none()));
@@ -768,12 +793,16 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
 
         assert_eq!(traces.len(), 2);
-        assert!(traces
-            .iter()
-            .all(|t| t.source_file.as_deref() == Some("src/main.cpp")));
+        assert!(
+            traces
+                .iter()
+                .all(|t| t.source_file.as_deref() == Some("src/main.cpp"))
+        );
         // The Source span survives fusion as its own root category.
-        assert!(traces
-            .iter()
-            .all(|t| t.trace_tree.roots.contains_key("Source")));
+        assert!(
+            traces
+                .iter()
+                .all(|t| t.trace_tree.roots.contains_key("Source"))
+        );
     }
 }

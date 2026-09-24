@@ -1,6 +1,5 @@
 use std::{
-    fs,
-    io,
+    fs, io,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -345,10 +344,7 @@ set(CMAKE_CXX_STANDARD 20)
             toolchain.build_system.as_ref().unwrap().version,
             String::new()
         );
-        assert_eq!(
-            toolchain.generator.as_ref().unwrap().name,
-            "Unix Makefiles"
-        );
+        assert_eq!(toolchain.generator.as_ref().unwrap().name, "Unix Makefiles");
     }
 
     #[test]
