@@ -1,5 +1,3 @@
-use anyhow;
-
 use build_time_insight::report::{self, Report};
 
 use build_time_insight::{analyzer, build_info, build_traces, cli};

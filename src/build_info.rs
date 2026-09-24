@@ -100,12 +100,12 @@ fn select_cmake_files_dir(version_dirs: &[PathBuf], toolchain: &Toolchain) -> Op
         if found_dir.is_some() {
             log::trace!(
                 "Found CMakeFiles directory corresponding to version {}",
-                &build_system.version
+                build_system.version
             );
         } else {
             log::trace!(
                 "Could not find CMakeFiles directory corresponding to version {}",
-                &build_system.version
+                build_system.version
             );
         }
         return found_dir;
@@ -152,10 +152,10 @@ fn parse_cmake_cache(cache_content: &str) -> Toolchain {
                         _ => {}
                     }
                 }
-            } else if key == "CMAKE_GENERATOR" {
-                if let Some(eq_pos) = trimmed.find('=') {
-                    generator_name = Some(trimmed[eq_pos + 1..].trim().to_string());
-                }
+            } else if key == "CMAKE_GENERATOR"
+                && let Some(eq_pos) = trimmed.find('=')
+            {
+                generator_name = Some(trimmed[eq_pos + 1..].trim().to_string());
             }
         }
     }
@@ -264,7 +264,7 @@ fn git_commit_from_output(success: bool, git_command_out: Vec<u8>) -> Option<Str
 
 fn extract_git_commit(build_dir: &str) -> Option<String> {
     let output = Command::new("git")
-        .args(&["rev-parse", "HEAD"])
+        .args(["rev-parse", "HEAD"])
         .current_dir(build_dir)
         .output()
         .ok()?;
@@ -385,11 +385,13 @@ set(CMAKE_CXX_STANDARD 20)
             PathBuf::from("CMakeFiles/3.28.1"),
             PathBuf::from("CMakeFiles/3.28.0"),
         ];
-        let mut toolchain = Toolchain::default();
-        toolchain.build_system = Some(Tool {
-            name: "CMake".to_string(),
-            version: "3.28.0".to_string(),
-        });
+        let toolchain = Toolchain {
+            build_system: Some(Tool {
+                name: "CMake".to_string(),
+                version: "3.28.0".to_string(),
+            }),
+            ..Default::default()
+        };
         let found = select_cmake_files_dir(&dirs, &toolchain).unwrap();
         assert_eq!(found.file_name().unwrap().to_str().unwrap(), "3.28.0");
     }
@@ -408,11 +410,13 @@ set(CMAKE_CXX_STANDARD 20)
     #[test]
     fn select_cmake_files_dir_returns_none_when_no_matching_version() {
         let dirs = vec![PathBuf::from("CMakeFiles/3.26.0")];
-        let mut toolchain = Toolchain::default();
-        toolchain.build_system = Some(Tool {
-            name: "CMake".to_string(),
-            version: "3.30.0".to_string(),
-        });
+        let toolchain = Toolchain {
+            build_system: Some(Tool {
+                name: "CMake".to_string(),
+                version: "3.30.0".to_string(),
+            }),
+            ..Default::default()
+        };
         assert!(select_cmake_files_dir(&dirs, &toolchain).is_none());
     }
 

@@ -237,7 +237,7 @@ pub fn analyze(traces: Vec<FileTrace>) -> AnalysisResult {
                             .args
                             .as_ref()
                             .and_then(|args| args.detail.as_deref())
-                            .map(|header| header.splitn(2, ':').next().unwrap_or(header))
+                            .map(|header| header.split(':').next().unwrap_or(header))
                             .filter(|h| h.ends_with(".h") || h.ends_with(".hpp"))
                             .map(|h| (h, node.trace.dur.unwrap_or(0)));
                         if let Some((header, duration)) = header_and_dur {
@@ -328,7 +328,7 @@ pub fn analyze(traces: Vec<FileTrace>) -> AnalysisResult {
                         .as_ref()
                         .and_then(|args| args.detail.as_deref())
                     {
-                        let header = header.splitn(2, ':').next().unwrap_or(header);
+                        let header = header.split(':').next().unwrap_or(header);
                         if header.ends_with(".h") || header.ends_with(".hpp") {
                             analysis
                                 .header_parse_duration
@@ -361,20 +361,18 @@ pub fn analyze(traces: Vec<FileTrace>) -> AnalysisResult {
                         .args
                         .as_ref()
                         .and_then(|args| args.detail.as_deref())
-                        .map(|f| f.splitn(2, ':').next().unwrap_or(f).to_string());
+                        .map(|f| f.split(':').next().unwrap_or(f).to_string());
                     if let Some(file) = file {
                         chain.push(file.clone());
-                        if file.ends_with(".h") || file.ends_with(".hpp") {
-                            if chain.len() > 1 {
+                        if (file.ends_with(".h") || file.ends_with(".hpp")) && chain.len() > 1 {
                                 let header_chain = chain[1..].join(" -> ");
                                 analysis
                                     .header_inclusion_paths
                                     .entry(file)
-                                    .or_insert_with(HashMap::new)
+                                    .or_default()
                                     .entry(header_chain)
                                     .and_modify(|count| *count += 1)
                                     .or_insert(1);
-                            }
                         }
                     }
                     for &child in &node.children {

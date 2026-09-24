@@ -36,7 +36,7 @@ fn parse_traces(build_dir: &str) -> HashMap<String, TraceEventFile> {
         })
         .collect();
     log::trace!("Parsed {} trace files", parsed_traces.len());
-    return parsed_traces;
+    parsed_traces
 }
 
 type NodeId = usize;
@@ -78,23 +78,23 @@ fn fuse_async_trace_events(events: &mut Vec<TraceEvent>) {
     let mut indices_to_remove =
         FxHashSet::with_capacity_and_hasher(events.len() / 2, Default::default());
 
-    for i in 0..events.len() {
-        let ph = events[i].ph.as_str();
+    for (i, event) in events.iter().enumerate() {
+        let ph = event.ph.as_str();
 
         if ph == "b" {
-            if let Some(id) = events[i].id {
-                let key = (events[i].cat.as_deref(), id);
+            if let Some(id) = event.id {
+                let key = (event.cat.as_deref(), id);
                 pending_stacks.entry(key).or_default().push(i);
             }
-        } else if ph == "e" {
-            if let Some(id) = events[i].id {
-                let key = (events[i].cat.as_deref(), id);
+        } else if ph == "e"
+            && let Some(id) = event.id
+        {
+            let key = (event.cat.as_deref(), id);
 
-                if let Some(start_idx) = pending_stacks.get_mut(&key).and_then(|s| s.pop()) {
-                    let end_ts = events[i].ts;
-                    mutations.push((start_idx, end_ts));
-                    indices_to_remove.insert(i);
-                }
+            if let Some(start_idx) = pending_stacks.get_mut(&key).and_then(|s| s.pop()) {
+                let end_ts = event.ts;
+                mutations.push((start_idx, end_ts));
+                indices_to_remove.insert(i);
             }
         }
     }
@@ -164,7 +164,7 @@ impl TraceTree {
             let current_tid = tree.nodes[i].trace.tid;
 
             let key: ThreadKey = (current_cat_str, current_pid, current_tid);
-            let active_stack = thread_lanes.entry(key).or_insert_with(Vec::new);
+            let active_stack = thread_lanes.entry(key).or_default();
 
             let mut found_parent = false;
             let mut matched_p_idx = 0;
@@ -192,7 +192,7 @@ impl TraceTree {
             }
 
             // Only register this event as a parent if it has a real structural duration container
-            let can_be_parent = !is_metadata && tree.nodes[i].trace.dur.map_or(false, |d| d > 0);
+            let can_be_parent = !is_metadata && tree.nodes[i].trace.dur.is_some_and(|d| d > 0);
             if can_be_parent {
                 active_stack.push(i);
             }
@@ -204,7 +204,7 @@ impl TraceTree {
 
             // Node is not enclosed by any other event; it becomes a root in its category
             let root_name = current_cat_str.unwrap_or("").to_string();
-            tree.roots.entry(root_name).or_insert_with(Vec::new).push(i);
+            tree.roots.entry(root_name).or_default().push(i);
         }
 
         // Apply parents and populate children arrays
