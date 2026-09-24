@@ -6,39 +6,18 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize, Serializer, ser::SerializeMap};
+use thiserror::Error;
 
 use crate::{analyzer::AnalysisResult, build_info::BuildInfo};
 
-#[derive(Debug)]
+#[derive(Debug, Error)]
 pub enum ReportError {
-    Io(std::io::Error),
-    Encode(rmp_serde::encode::Error),
-    Decode(rmp_serde::decode::Error),
-}
-
-impl From<std::io::Error> for ReportError {
-    fn from(e: std::io::Error) -> Self {
-        ReportError::Io(e)
-    }
-}
-impl From<rmp_serde::encode::Error> for ReportError {
-    fn from(e: rmp_serde::encode::Error) -> Self {
-        ReportError::Encode(e)
-    }
-}
-impl From<rmp_serde::decode::Error> for ReportError {
-    fn from(e: rmp_serde::decode::Error) -> Self {
-        ReportError::Decode(e)
-    }
-}
-impl std::fmt::Display for ReportError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            ReportError::Io(e) => write!(f, "I/O error: {e}"),
-            ReportError::Encode(e) => write!(f, "encode error: {e}"),
-            ReportError::Decode(e) => write!(f, "decode error: {e}"),
-        }
-    }
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("Encode error: {0}")]
+    Encode(#[from] rmp_serde::encode::Error),
+    #[error("Decode error: {0}")]
+    Decode(#[from] rmp_serde::decode::Error),
 }
 
 /// Borrowing view of a `HashMap` that emits its keys in sorted order.

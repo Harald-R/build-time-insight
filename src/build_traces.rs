@@ -1,3 +1,4 @@
+use anyhow;
 use log;
 use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -270,7 +271,7 @@ pub struct FileTrace {
     pub trace_tree: TraceTree,
 }
 
-pub fn collect_build_traces(build_dir: &str) -> Result<Vec<FileTrace>, String> {
+pub fn collect_build_traces(build_dir: &str) -> anyhow::Result<Vec<FileTrace>> {
     let parsed_traces = parse_traces(build_dir);
     let traces: Vec<FileTrace> = parsed_traces
         .into_par_iter()

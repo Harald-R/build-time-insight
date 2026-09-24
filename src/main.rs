@@ -1,37 +1,23 @@
+use anyhow;
+
 use build_time_insight::report::{self, Report};
 
-use build_time_insight::analyzer;
-use build_time_insight::build_info;
-use build_time_insight::build_traces;
-use build_time_insight::cli;
+use build_time_insight::{analyzer, build_info, build_traces, cli};
 
-fn main() {
+fn main() -> anyhow::Result<()> {
     env_logger::init();
 
-    let build_dir = match cli::parse_dir_arg() {
-        Ok(path) => path,
-        Err(e) => {
-            eprintln!("Error: {}", e);
-            std::process::exit(1);
-        }
-    };
+    let build_dir = cli::parse_dir_arg()?;
     println!("Build dir: {}", build_dir);
 
     let build_info = build_info::extract_build_info(&build_dir);
     println!("Build info: {:#?}", build_info);
 
-    let analysis_result = match build_traces::collect_build_traces(&build_dir) {
-        Ok(traces) => {
-            for t in &traces {
-                t.trace_tree.print_tree(0);
-            }
-            analyzer::analyze(traces)
-        }
-        Err(e) => {
-            eprintln!("Error: {}", e);
-            std::process::exit(1);
-        }
-    };
+    let traces = build_traces::collect_build_traces(&build_dir)?;
+    for t in &traces {
+        t.trace_tree.print_tree(0);
+    }
+    let analysis_result = analyzer::analyze(traces);
 
     println!("Longest files to compile:");
     for analysis in analysis_result.longest_unit_compilations(10).enumerate() {
@@ -101,7 +87,8 @@ fn main() {
         );
     }
 
-    let report = Report::new(build_info,  analysis_result);
+    let report = Report::new(build_info, analysis_result);
     let path = std::env::temp_dir().join("report.msgpack");
-    report::write_report(&report, &path).unwrap();
+    report::write_report(&report, &path)?;
+    Ok(())
 }
