@@ -1,1 +1,10 @@
-/target
+
+debug
+target
+
+**/*.rs.bk
+
+.vscode
+.nvim.lua
+.nvimrc
+.exrc
