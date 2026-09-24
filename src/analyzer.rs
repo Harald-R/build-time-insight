@@ -146,7 +146,9 @@ impl AnalysisResult {
                     .iter()
                     .map(|(name, inst)| ("class", name, inst)),
             )
-            .k_largest_by(num_items, |a, b| a.2.total_duration.cmp(&b.2.total_duration))
+            .k_largest_by(num_items, |a, b| {
+                a.2.total_duration.cmp(&b.2.total_duration)
+            })
     }
 
     fn get_per_header_analysis(
@@ -384,4 +386,444 @@ pub fn analyze(traces: Vec<FileTrace>) -> AnalysisResult {
         })
         .collect();
     AnalysisResult::from(unit_analysis)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::build_traces::TraceTree;
+
+    #[allow(clippy::too_many_arguments)]
+    fn trace_event(
+        name: &str,
+        cat: Option<&str>,
+        ph: &str,
+        pid: i64,
+        tid: i64,
+        id: Option<i64>,
+        ts: i64,
+        dur: Option<i64>,
+        detail: Option<&str>,
+    ) -> TraceEvent {
+        TraceEvent {
+            name: name.to_string(),
+            cat: cat.map(str::to_string),
+            ph: ph.to_string(),
+            pid,
+            tid,
+            id,
+            ts,
+            dur,
+            args: detail.map(|d| TraceArgs {
+                detail: Some(d.to_string()),
+            }),
+        }
+    }
+
+    // Complete "X" event as emitted by clang: no category, pid == tid
+    fn x_event(name: &str, pid: i64, tid: i64, ts: i64, dur: i64) -> TraceEvent {
+        trace_event(name, None, "X", pid, tid, None, ts, Some(dur), None)
+    }
+
+    fn x_event_detail(
+        name: &str,
+        pid: i64,
+        tid: i64,
+        ts: i64,
+        dur: i64,
+        detail: &str,
+    ) -> TraceEvent {
+        trace_event(name, None, "X", pid, tid, None, ts, Some(dur), Some(detail))
+    }
+
+    // Async "Source" begin/end events: category "Source", id 0
+    fn source_begin(pid: i64, tid: i64, ts: i64, file: &str) -> TraceEvent {
+        trace_event(
+            "Source",
+            Some("Source"),
+            "b",
+            pid,
+            tid,
+            Some(0),
+            ts,
+            None,
+            Some(file),
+        )
+    }
+
+    fn source_end(pid: i64, tid: i64, ts: i64) -> TraceEvent {
+        trace_event(
+            "Source",
+            Some("Source"),
+            "e",
+            pid,
+            tid,
+            Some(0),
+            ts,
+            None,
+            None,
+        )
+    }
+
+    fn file_trace(source_file: Option<&str>, events: Vec<TraceEvent>) -> FileTrace {
+        FileTrace {
+            trace_file: "build/main.cpp.json".to_string(),
+            source_file: source_file.map(str::to_string),
+            trace_tree: TraceTree::from(events),
+        }
+    }
+
+    fn unit_analysis(total_duration: i64) -> UnitAnalysis {
+        UnitAnalysis {
+            total_duration,
+            frontend_duration: 0,
+            backend_duration: 0,
+            template_instantiation_duration: 0,
+            header_parse_duration: HashMap::new(),
+            header_inclusion_paths: HashMap::new(),
+            function_template_instantiations: HashMap::new(),
+            class_template_instantiations: HashMap::new(),
+        }
+    }
+
+    fn header_analysis(parse_duration: i64) -> HeaderAnalysis {
+        HeaderAnalysis {
+            parse_duration,
+            num_inclusions: 1,
+            inclusion_paths: HashMap::new(),
+        }
+    }
+
+    fn analysis_result(
+        function_instantiations: &[(&str, i64)],
+        class_instantiations: &[(&str, i64)],
+    ) -> AnalysisResult {
+        let mut result = AnalysisResult {
+            unit_analysis: HashMap::new(),
+            header_analysis: HashMap::new(),
+            function_template_instantiations: HashMap::new(),
+            class_template_instantiations: HashMap::new(),
+        };
+        for (name, dur) in function_instantiations {
+            result
+                .function_template_instantiations
+                .insert((*name).into(), TemplateInstantiation::new(*dur));
+        }
+        for (name, dur) in class_instantiations {
+            result
+                .class_template_instantiations
+                .insert((*name).into(), TemplateInstantiation::new(*dur));
+        }
+        result
+    }
+
+    fn analyze_unit(trace: FileTrace, source_file: &str) -> UnitAnalysis {
+        let mut result = analyze(vec![trace]);
+        result.unit_analysis.remove(source_file).unwrap()
+    }
+
+    #[test]
+    fn template_instantiation_new_and_add() {
+        let mut inst = TemplateInstantiation::new(10);
+        assert_eq!(inst.total_duration, 10);
+        assert_eq!(inst.num_instantiations, 1);
+        inst.add(15);
+        assert_eq!(inst.total_duration, 25);
+        assert_eq!(inst.num_instantiations, 2);
+    }
+
+    #[test]
+    fn template_instantiation_merge() {
+        let mut inst = TemplateInstantiation::new(10);
+        inst.merge(&TemplateInstantiation::new(20));
+        assert_eq!(inst.total_duration, 30);
+        assert_eq!(inst.num_instantiations, 2);
+    }
+
+    #[test]
+    fn largest_template_instantiation_returns_max_by_duration() {
+        let mut unit = unit_analysis(0);
+        unit.function_template_instantiations
+            .insert("a".into(), TemplateInstantiation::new(10));
+        unit.function_template_instantiations
+            .insert("b".into(), TemplateInstantiation::new(30));
+        unit.class_template_instantiations
+            .insert("c".into(), TemplateInstantiation::new(20));
+
+        let (name, inst) = unit.largest_function_template_instantiation().unwrap();
+        assert_eq!(name, "b");
+        assert_eq!(inst.total_duration, 30);
+
+        let (name, inst) = unit.largest_class_template_instantiation().unwrap();
+        assert_eq!(name, "c");
+        assert_eq!(inst.total_duration, 20);
+    }
+
+    #[test]
+    fn largest_template_instantiation_is_none_when_empty() {
+        assert!(
+            unit_analysis(0)
+                .largest_function_template_instantiation()
+                .is_none()
+        );
+        assert!(
+            unit_analysis(0)
+                .largest_class_template_instantiation()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn analysis_result_merges_template_instantiations_across_units() {
+        let mut a = unit_analysis(100);
+        a.function_template_instantiations
+            .insert("std::vector<int>".into(), TemplateInstantiation::new(100));
+        a.function_template_instantiations
+            .insert("std::allocator".into(), TemplateInstantiation::new(50));
+        a.class_template_instantiations
+            .insert("std::map".into(), TemplateInstantiation::new(70));
+
+        let mut b = unit_analysis(200);
+        b.function_template_instantiations
+            .insert("std::vector<int>".into(), TemplateInstantiation::new(200));
+        b.class_template_instantiations
+            .insert("std::map".into(), TemplateInstantiation::new(30));
+
+        let result =
+            AnalysisResult::from(HashMap::from([("a.cpp".into(), a), ("b.cpp".into(), b)]));
+
+        let vector = &result.function_template_instantiations["std::vector<int>"];
+        assert_eq!(vector.total_duration, 300);
+        assert_eq!(vector.num_instantiations, 2);
+        assert_eq!(
+            result.function_template_instantiations["std::allocator"].total_duration,
+            50
+        );
+        let map = &result.class_template_instantiations["std::map"];
+        assert_eq!(map.total_duration, 100);
+        assert_eq!(map.num_instantiations, 2);
+    }
+
+    #[test]
+    fn analysis_result_aggregates_header_parse_durations() {
+        let mut a = unit_analysis(0);
+        a.header_parse_duration = HashMap::from([("a.h".into(), 100), ("b.h".into(), 50)]);
+        a.header_inclusion_paths
+            .insert("a.h".into(), HashMap::from([("a.h -> b.h".into(), 1)]));
+        let mut b = unit_analysis(0);
+        b.header_parse_duration = HashMap::from([("a.h".into(), 200), ("c.h".into(), 30)]);
+        b.header_inclusion_paths
+            .insert("a.h".into(), HashMap::from([("a.h -> b.h".into(), 2)]));
+
+        let result =
+            AnalysisResult::from(HashMap::from([("a.cpp".into(), a), ("b.cpp".into(), b)]));
+
+        let a_h = &result.header_analysis["a.h"];
+        assert_eq!(a_h.parse_duration, 300);
+        assert_eq!(a_h.num_inclusions, 2);
+        assert_eq!(a_h.inclusion_paths["a.h -> b.h"], 3);
+
+        let b_h = &result.header_analysis["b.h"];
+        assert_eq!(b_h.parse_duration, 50);
+        assert_eq!(b_h.num_inclusions, 1);
+
+        let c_h = &result.header_analysis["c.h"];
+        assert_eq!(c_h.parse_duration, 30);
+        assert_eq!(c_h.num_inclusions, 1);
+    }
+
+    #[test]
+    fn longest_template_instantiations_returns_top_k() {
+        let result = analysis_result(
+            &[("f1", 10), ("f2", 50), ("f3", 30)],
+            &[("c1", 20), ("c2", 70)],
+        );
+        let mut top: Vec<_> = result.longest_template_instantiations(2).collect();
+        top.sort_by_key(|x| std::cmp::Reverse(x.2.total_duration));
+        assert_eq!(top.len(), 2);
+        assert_eq!(top[0].0, "class");
+        assert_eq!(top[0].1, "c2");
+        assert_eq!(top[0].2.total_duration, 70);
+        assert_eq!(top[1].0, "function");
+        assert_eq!(top[1].1, "f2");
+        assert_eq!(top[1].2.total_duration, 50);
+    }
+
+    #[test]
+    fn longest_unit_compilations_returns_top_k() {
+        let result = AnalysisResult {
+            unit_analysis: HashMap::from([
+                ("a.cpp".into(), unit_analysis(50)),
+                ("b.cpp".into(), unit_analysis(200)),
+                ("c.cpp".into(), unit_analysis(100)),
+            ]),
+            header_analysis: HashMap::new(),
+            function_template_instantiations: HashMap::new(),
+            class_template_instantiations: HashMap::new(),
+        };
+        let mut top: Vec<_> = result.longest_unit_compilations(2).collect();
+        top.sort_by_key(|x| std::cmp::Reverse(x.1.total_duration));
+        assert_eq!(top.len(), 2);
+        assert_eq!(top[0].0, "b.cpp");
+        assert_eq!(top[0].1.total_duration, 200);
+        assert_eq!(top[1].0, "c.cpp");
+        assert_eq!(top[1].1.total_duration, 100);
+    }
+
+    #[test]
+    fn longest_headers_parse_duration_returns_top_k() {
+        let result = AnalysisResult {
+            unit_analysis: HashMap::new(),
+            header_analysis: HashMap::from([
+                ("a.h".into(), header_analysis(10)),
+                ("b.h".into(), header_analysis(90)),
+                ("c.h".into(), header_analysis(50)),
+            ]),
+            function_template_instantiations: HashMap::new(),
+            class_template_instantiations: HashMap::new(),
+        };
+        let mut top: Vec<_> = result.longest_headers_parse_duration(2).collect();
+        top.sort_by_key(|x| std::cmp::Reverse(x.1.parse_duration));
+        assert_eq!(top.len(), 2);
+        assert_eq!(top[0].0, "b.h");
+        assert_eq!(top[1].0, "c.h");
+    }
+
+    #[test]
+    fn analyze_extracts_total_frontend_and_backend_durations() {
+        let trace = file_trace(
+            Some("src/main.cpp"),
+            vec![
+                x_event("ExecuteCompiler", 1, 1, 0, 1000),
+                x_event("Frontend", 1, 1, 10, 400),
+                x_event("Backend", 1, 1, 500, 400),
+                x_event("Total ExecuteCompiler", 1, 2, 0, 1000),
+                x_event("Total Frontend", 1, 3, 0, 400),
+                x_event("Total Backend", 1, 4, 0, 400),
+            ],
+        );
+        let unit = analyze_unit(trace, "src/main.cpp");
+        assert_eq!(unit.total_duration, 1000);
+        assert_eq!(unit.frontend_duration, 400);
+        assert_eq!(unit.backend_duration, 400);
+    }
+
+    #[test]
+    fn analyze_counts_template_instantiations_and_skips_nested() {
+        let trace = file_trace(
+            Some("src/main.cpp"),
+            vec![
+                x_event("Backend", 1, 1, 500, 400),
+                x_event_detail(
+                    "InstantiateFunction",
+                    1,
+                    1,
+                    510,
+                    150,
+                    "std::vector<int>::push_back",
+                ),
+                x_event_detail(
+                    "InstantiateFunction",
+                    1,
+                    1,
+                    515,
+                    40,
+                    "std::allocator<int>::allocate",
+                ),
+                x_event_detail("InstantiateClass", 1, 1, 670, 80, "std::vector<int>"),
+                x_event("PerformPendingInstantiations", 1, 1, 760, 100),
+            ],
+        );
+        let unit = analyze_unit(trace, "src/main.cpp");
+        // 150 (top-level) + 80 (class) + 100 (pending); the nested allocate is excluded
+        assert_eq!(unit.template_instantiation_duration, 330);
+        let push_back = &unit.function_template_instantiations["std::vector<int>::push_back"];
+        assert_eq!(push_back.total_duration, 150);
+        assert_eq!(push_back.num_instantiations, 1);
+        let allocate = &unit.function_template_instantiations["std::allocator<int>::allocate"];
+        assert_eq!(allocate.total_duration, 40);
+        assert_eq!(allocate.num_instantiations, 1);
+        let vec = &unit.class_template_instantiations["std::vector<int>"];
+        assert_eq!(vec.total_duration, 80);
+        assert_eq!(vec.num_instantiations, 1);
+    }
+
+    #[test]
+    fn analyze_extracts_header_parse_duration_from_source_spans() {
+        let trace = file_trace(
+            Some("src/main.cpp"),
+            vec![
+                x_event("ExecuteCompiler", 1, 1, 0, 1000),
+                source_begin(1, 1, 100, "src/app.h:5:1"),
+                source_end(1, 1, 400),
+            ],
+        );
+        let unit = analyze_unit(trace, "src/main.cpp");
+        assert_eq!(unit.header_parse_duration["src/app.h"], 300);
+    }
+
+    #[test]
+    fn analyze_falls_back_to_parse_events_for_headers() {
+        let trace = file_trace(
+            Some("src/main.cpp"),
+            vec![
+                x_event("Frontend", 1, 1, 0, 500),
+                x_event_detail(
+                    "ParseDeclarationOrFunctionDefinition",
+                    1,
+                    1,
+                    10,
+                    100,
+                    "lib/foo.h:3:5",
+                ),
+                x_event_detail(
+                    "ParseDeclarationOrFunctionDefinition",
+                    1,
+                    1,
+                    20,
+                    60,
+                    "lib/foo.h:12:1",
+                ),
+                x_event_detail(
+                    "ParseDeclarationOrFunctionDefinition",
+                    1,
+                    1,
+                    30,
+                    40,
+                    "src/main.cpp:5:1",
+                ),
+            ],
+        );
+        let unit = analyze_unit(trace, "src/main.cpp");
+        assert_eq!(unit.header_parse_duration["lib/foo.h"], 160);
+    }
+
+    #[test]
+    fn analyze_collects_header_inclusion_paths() {
+        let trace = file_trace(
+            Some("src/main.cpp"),
+            vec![
+                source_begin(1, 1, 100, "src/main.cpp"),
+                source_end(1, 1, 300),
+                source_begin(1, 1, 120, "lib/a.h:10:2"),
+                source_end(1, 1, 250),
+                source_begin(1, 1, 130, "lib/b.h:5:1"),
+                source_end(1, 1, 240),
+            ],
+        );
+        let unit = analyze_unit(trace, "src/main.cpp");
+        assert_eq!(unit.header_inclusion_paths["lib/a.h"]["lib/a.h"], 1);
+        assert_eq!(
+            unit.header_inclusion_paths["lib/b.h"]["lib/a.h -> lib/b.h"],
+            1
+        );
+    }
+
+    #[test]
+    fn analyze_uses_trace_file_when_source_file_missing() {
+        let trace = file_trace(None, vec![x_event("Total ExecuteCompiler", 1, 2, 0, 100)]);
+        let result = analyze(vec![trace]);
+        let unit = &result.unit_analysis["build/main.cpp.json"];
+        assert_eq!(unit.total_duration, 100);
+    }
 }
