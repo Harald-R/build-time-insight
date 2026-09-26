@@ -16,6 +16,22 @@ pub struct Cli {
     /// Number of parallel worker threads to use for the analysis
     #[arg(short, long, value_parser = parse_jobs)]
     pub jobs: Option<usize>,
+
+    /// Path where the report is written
+    #[arg(short, long)]
+    pub output: Option<PathBuf>,
+
+    /// Number of entries to show in each top-N list
+    #[arg(short, long, value_parser = parse_limit)]
+    pub limit: Option<usize>,
+
+    /// Increase logging verbosity; repeat for more detail
+    #[arg(short, long, action = clap::ArgAction::Count)]
+    pub verbose: u8,
+
+    /// Only log errors
+    #[arg(short, long)]
+    pub quiet: bool,
 }
 
 impl Cli {
@@ -23,9 +39,29 @@ impl Cli {
         <Self as Parser>::parse()
     }
 
-    /// Resolve the number of worker threads, defaulting to all available CPUs
+    /// Resolve the number of worker threads, defaulting to the number of
+    /// available system threads and never exceeding it.
     pub fn jobs(&self) -> usize {
-        self.jobs.unwrap_or_else(default_jobs)
+        let system = default_jobs();
+        self.jobs.unwrap_or(system).min(system)
+    }
+
+    /// Resolve the number of entries per top-N list.
+    pub fn limit(&self) -> usize {
+        self.limit.unwrap_or(15)
+    }
+
+    /// Resolve the log filter level from the verbosity and quiet flags.
+    pub fn log_level(&self) -> log::LevelFilter {
+        if self.quiet {
+            log::LevelFilter::Error
+        } else {
+            match self.verbose {
+                0 => log::LevelFilter::Info,
+                1 => log::LevelFilter::Debug,
+                _ => log::LevelFilter::Trace,
+            }
+        }
     }
 }
 
@@ -39,6 +75,16 @@ fn parse_jobs(s: &str) -> Result<usize, String> {
         .map_err(|_| format!("'{s}' is not a valid number of jobs"))?;
     if n == 0 {
         return Err("number of jobs must be at least 1".to_string());
+    }
+    Ok(n)
+}
+
+fn parse_limit(s: &str) -> Result<usize, String> {
+    let n: usize = s
+        .parse()
+        .map_err(|_| format!("'{s}' is not a valid limit"))?;
+    if n == 0 {
+        return Err("limit must be at least 1".to_string());
     }
     Ok(n)
 }
@@ -90,8 +136,53 @@ mod tests {
     }
 
     #[test]
+    fn test_jobs_is_capped_at_available_threads() {
+        let cli = Cli::try_parse_from(["build-time-insight", "src", "-j", "999999"]).unwrap();
+        assert_eq!(cli.jobs(), default_jobs());
+    }
+
+    #[test]
     fn test_jobs_rejects_zero() {
         let err = Cli::try_parse_from(["build-time-insight", "src", "-j", "0"]).unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+    }
+
+    #[test]
+    fn test_output_argument_sets_report_path() {
+        let cli =
+            Cli::try_parse_from(["build-time-insight", "src", "-o", "/tmp/r.msgpack"]).unwrap();
+        assert_eq!(cli.output, Some(PathBuf::from("/tmp/r.msgpack")));
+    }
+
+    #[test]
+    fn test_limit_argument_controls_top_n() {
+        let cli = Cli::try_parse_from(["build-time-insight", "src", "--limit", "5"]).unwrap();
+        assert_eq!(cli.limit(), 5);
+    }
+
+    #[test]
+    fn test_limit_defaults_to_fifteen() {
+        let cli = Cli::try_parse_from(["build-time-insight", "src"]).unwrap();
+        assert_eq!(cli.limit(), 15);
+    }
+
+    #[test]
+    fn test_limit_rejects_zero() {
+        let err = Cli::try_parse_from(["build-time-insight", "src", "--limit", "0"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+    }
+
+    #[test]
+    fn test_verbose_counts_occurrences() {
+        let cli = Cli::try_parse_from(["build-time-insight", "src", "-vv"]).unwrap();
+        assert_eq!(cli.verbose, 2);
+        assert_eq!(cli.log_level(), log::LevelFilter::Trace);
+    }
+
+    #[test]
+    fn test_quiet_sets_error_level() {
+        let cli = Cli::try_parse_from(["build-time-insight", "src", "-q"]).unwrap();
+        assert!(cli.quiet);
+        assert_eq!(cli.log_level(), log::LevelFilter::Error);
     }
 }

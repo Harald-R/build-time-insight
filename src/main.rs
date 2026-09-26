@@ -3,11 +3,15 @@ use build_time_insight::report::{self, Report};
 use build_time_insight::{analyzer, build_info, cli};
 
 fn main() -> anyhow::Result<()> {
-    env_logger::init();
-
     let cli = cli::Cli::parse();
+    env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or(cli.log_level().to_string()),
+    )
+    .init();
+
     let build_dir = cli.build_dir.to_string_lossy().into_owned();
     let jobs = cli.jobs();
+    let limit = cli.limit();
     log::info!("Build dir: {}", build_dir);
     log::info!("Jobs: {}", jobs);
 
@@ -17,7 +21,7 @@ fn main() -> anyhow::Result<()> {
     let analysis_result = analyzer::analyze_build_dir(&build_dir, jobs);
 
     println!("Longest files to compile:");
-    for analysis in analysis_result.longest_unit_compilations(10).enumerate() {
+    for analysis in analysis_result.longest_unit_compilations(limit).enumerate() {
         println!(
             "{}. {}: {} us",
             analysis.0 + 1,
@@ -28,7 +32,7 @@ fn main() -> anyhow::Result<()> {
 
     println!("Longest headers to parse:");
     for header in analysis_result
-        .longest_headers_parse_duration(10)
+        .longest_headers_parse_duration(limit)
         .enumerate()
     {
         let (name, analysis) = header.1;
@@ -71,7 +75,7 @@ fn main() -> anyhow::Result<()> {
 
     println!("Largest template instantiations in the entire build:");
     for (rank, (kind, name, inst)) in analysis_result
-        .longest_template_instantiations(10)
+        .longest_template_instantiations(limit)
         .enumerate()
     {
         println!(
@@ -85,7 +89,10 @@ fn main() -> anyhow::Result<()> {
     }
 
     let report = Report::new(build_info, analysis_result);
-    let path = std::env::temp_dir().join("report.msgpack");
+    let path = cli
+        .output
+        .clone()
+        .unwrap_or_else(|| std::env::temp_dir().join("report.msgpack"));
     report::write_report(&report, &path)?;
     log::info!("Wrote report to {}", path.display());
     Ok(())
