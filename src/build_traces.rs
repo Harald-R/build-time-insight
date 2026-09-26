@@ -8,15 +8,23 @@ use std::{
 
 use crate::raw_trace::*;
 
-fn deserialize_trace_event_file<R: Read>(reader: R) -> Option<TraceEventFile> {
-    serde_json::from_reader(reader).ok()
+fn deserialize_trace_event_file<R: Read>(reader: R) -> Result<TraceEventFile, serde_json::Error> {
+    serde_json::from_reader(reader)
 }
 
 /// Glob the build directory for `-ftime-trace` files
 pub fn glob_trace_paths(build_dir: &str) -> Vec<PathBuf> {
     let pattern = build_dir.to_owned() + "/**/*.cpp.json";
     let paths: Vec<PathBuf> = match glob::glob(&pattern) {
-        Ok(paths) => paths.filter_map(|e| e.ok()).collect(),
+        Ok(paths) => paths
+            .filter_map(|entry| match entry {
+                Ok(path) => Some(path),
+                Err(e) => {
+                    log::warn!("Error while globbing '{}': {}", pattern, e);
+                    None
+                }
+            })
+            .collect(),
         Err(e) => {
             eprintln!("Glob pattern error: {}", e);
             return Vec::new();
@@ -26,11 +34,23 @@ pub fn glob_trace_paths(build_dir: &str) -> Vec<PathBuf> {
     paths
 }
 
-/// Parse a trace file into its raw events
+/// Parse a trace file into its raw events, logging and skipping broken files
 pub fn parse_trace_file(path: &Path) -> Option<TraceEventFile> {
-    let file = File::open(path).ok()?;
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(e) => {
+            log::warn!("Could not open trace file '{}': {}", path.display(), e);
+            return None;
+        }
+    };
     let reader = BufReader::new(file);
-    deserialize_trace_event_file(reader)
+    match deserialize_trace_event_file(reader) {
+        Ok(trace) => Some(trace),
+        Err(e) => {
+            log::warn!("Skipping broken trace file '{}': {}", path.display(), e);
+            None
+        }
+    }
 }
 
 /// Extract the translation unit's source file from the `OptModule` event
@@ -746,7 +766,7 @@ mod tests {
 
     #[test]
     fn deserialize_trace_event_file_rejects_invalid_json() {
-        assert!(deserialize_trace_event_file("not json".as_bytes()).is_none());
+        assert!(deserialize_trace_event_file("not json".as_bytes()).is_err());
     }
 
     #[test]
