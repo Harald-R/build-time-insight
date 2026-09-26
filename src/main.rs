@@ -5,13 +5,16 @@ use build_time_insight::{analyzer, build_info, cli};
 fn main() -> anyhow::Result<()> {
     env_logger::init();
 
-    let build_dir = cli::parse_dir_arg();
+    let cli = cli::Cli::parse();
+    let build_dir = cli.build_dir.to_string_lossy().into_owned();
+    let jobs = cli.jobs();
     println!("Build dir: {}", build_dir);
+    println!("Jobs: {}", jobs);
 
     let build_info = build_info::extract_build_info(&build_dir);
     println!("Build info: {:#?}", build_info);
 
-    let analysis_result = analyzer::analyze_build_dir(&build_dir);
+    let analysis_result = analyzer::analyze_build_dir(&build_dir, jobs);
 
     println!("Longest files to compile:");
     for analysis in analysis_result.longest_unit_compilations(10).enumerate() {

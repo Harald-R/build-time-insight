@@ -1,5 +1,6 @@
 use std::cmp::min;
 use std::collections::HashMap;
+use std::sync::LazyLock;
 
 use itertools::Itertools;
 use rayon::iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
@@ -7,6 +8,17 @@ use serde::{Deserialize, Serialize};
 
 use crate::build_traces::{FileTrace, LoopControl, TraceNode, TraceTree};
 use crate::raw_trace::*;
+
+fn build_pool(jobs: usize) -> rayon::ThreadPool {
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(jobs)
+        .build()
+        .expect("failed to build rayon thread pool")
+}
+
+// Pool used by the default (test-facing) `analyze` entry point
+static POOL: LazyLock<rayon::ThreadPool> =
+    LazyLock::new(|| build_pool(std::thread::available_parallelism().map_or(1, |n| n.get())));
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UnitAnalysis {
@@ -393,31 +405,33 @@ pub fn analyze_unit(trace: &FileTrace) -> (String, UnitAnalysis) {
 
 pub fn analyze(traces: Vec<FileTrace>) -> AnalysisResult {
     let unit_analysis: HashMap<String, UnitAnalysis> =
-        traces.par_iter().map(analyze_unit).collect();
+        POOL.install(move || traces.par_iter().map(analyze_unit).collect());
     AnalysisResult::from(unit_analysis)
 }
 
-/// Analyze the build directory.
+/// Analyze the build directory using up to `jobs` worker threads.
 ///
 /// Each worker thread processes one trace file completely (parse -> tree ->
 /// analyze) and returns only the small per-unit result, so peak memory scales
 /// with the number of worker threads.
-pub fn analyze_build_dir(build_dir: &str) -> AnalysisResult {
+pub fn analyze_build_dir(build_dir: &str, jobs: usize) -> AnalysisResult {
     let paths = crate::build_traces::glob_trace_paths(build_dir);
-    let unit_analysis: HashMap<String, UnitAnalysis> = paths
-        .into_par_iter()
-        .filter_map(|path| {
-            let trace = crate::build_traces::parse_trace_file(&path)?;
-            let source_file = crate::build_traces::source_file_from_trace(&trace);
-            let trace_tree = TraceTree::from(trace.trace_events);
-            let file_trace = FileTrace {
-                trace_file: path.to_str()?.to_string(),
-                source_file: Some(source_file),
-                trace_tree,
-            };
-            Some(analyze_unit(&file_trace))
-        })
-        .collect();
+    let unit_analysis: HashMap<String, UnitAnalysis> = build_pool(jobs).install(move || {
+        paths
+            .into_par_iter()
+            .filter_map(|path| {
+                let trace = crate::build_traces::parse_trace_file(&path)?;
+                let source_file = crate::build_traces::source_file_from_trace(&trace);
+                let trace_tree = TraceTree::from(trace.trace_events);
+                let file_trace = FileTrace {
+                    trace_file: path.to_str()?.to_string(),
+                    source_file: Some(source_file),
+                    trace_tree,
+                };
+                Some(analyze_unit(&file_trace))
+            })
+            .collect()
+    });
     AnalysisResult::from(unit_analysis)
 }
 
@@ -910,7 +924,7 @@ mod tests {
         write_trace_file(&dir, "broken.cpp.json", "{ not valid json");
         write_trace_file(&dir, "ignored.json", valid);
 
-        let result = analyze_build_dir(dir.to_str().unwrap());
+        let result = analyze_build_dir(dir.to_str().unwrap(), 2);
         std::fs::remove_dir_all(&dir).ok();
 
         assert_eq!(result.unit_analysis.len(), 1);
