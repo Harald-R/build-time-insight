@@ -1,12 +1,9 @@
-use anyhow;
 use log;
-use rayon::prelude::*;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::{
-    collections::HashMap,
     fs::File,
     io::{BufReader, Read},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 use crate::raw_trace::*;
@@ -15,28 +12,36 @@ fn deserialize_trace_event_file<R: Read>(reader: R) -> Option<TraceEventFile> {
     serde_json::from_reader(reader).ok()
 }
 
-fn parse_traces(build_dir: &str) -> HashMap<String, TraceEventFile> {
+/// Glob the build directory for `-ftime-trace` files
+pub fn glob_trace_paths(build_dir: &str) -> Vec<PathBuf> {
     let pattern = build_dir.to_owned() + "/**/*.cpp.json";
     let paths: Vec<PathBuf> = match glob::glob(&pattern) {
         Ok(paths) => paths.filter_map(|e| e.ok()).collect(),
         Err(e) => {
             eprintln!("Glob pattern error: {}", e);
-            return HashMap::new();
+            return Vec::new();
         }
     };
     log::trace!("Found {} trace files", paths.len());
-    let parsed_traces: HashMap<String, TraceEventFile> = paths
-        .into_par_iter()
-        .filter_map(|path| {
-            let path_str = path.to_str()?.to_string();
-            let file = File::open(&path).ok()?;
-            let reader = BufReader::new(file);
-            let trace = deserialize_trace_event_file(reader)?;
-            Some((path_str, trace))
-        })
-        .collect();
-    log::trace!("Parsed {} trace files", parsed_traces.len());
-    parsed_traces
+    paths
+}
+
+/// Parse a trace file into its raw events
+pub fn parse_trace_file(path: &Path) -> Option<TraceEventFile> {
+    let file = File::open(path).ok()?;
+    let reader = BufReader::new(file);
+    deserialize_trace_event_file(reader)
+}
+
+/// Extract the translation unit's source file from the `OptModule` event
+pub fn source_file_from_trace(trace: &TraceEventFile) -> String {
+    trace
+        .trace_events
+        .iter()
+        .find(|&event| event.name == OPT_MODULE)
+        .and_then(|event| event.args.as_ref().and_then(|args| args.detail.as_deref()))
+        .unwrap_or("")
+        .to_string()
 }
 
 type NodeId = usize;
@@ -282,29 +287,6 @@ pub struct FileTrace {
     pub trace_file: String,
     pub source_file: Option<String>,
     pub trace_tree: TraceTree,
-}
-
-pub fn collect_build_traces(build_dir: &str) -> anyhow::Result<Vec<FileTrace>> {
-    let parsed_traces = parse_traces(build_dir);
-    let traces: Vec<FileTrace> = parsed_traces
-        .into_par_iter()
-        .filter_map(|parsed_trace| {
-            let source_file = parsed_trace
-                .1
-                .trace_events
-                .iter()
-                .find(|&event| event.name == OPT_MODULE)
-                .and_then(|event| event.args.as_ref().and_then(|args| args.detail.as_deref()))
-                .unwrap_or("")
-                .to_string();
-            Some(FileTrace {
-                trace_file: parsed_trace.0,
-                source_file: Some(source_file),
-                trace_tree: TraceTree::from(parsed_trace.1.trace_events),
-            })
-        })
-        .collect();
-    Ok(traces)
 }
 
 #[cfg(test)]
@@ -768,41 +750,56 @@ mod tests {
     }
 
     #[test]
-    fn collect_build_traces_filters_and_parses_trace_files() {
-        let dir = test_build_dir("collect_build_traces");
-        // Minimal but realistic clang trace: metadata, complete events, an
-        // OptModule event carrying the source file, and a Source span
-        let valid = r#"{
-            "traceEvents": [
-                { "pid": 7, "tid": 7, "ts": 0, "ph": "M", "name": "process_name", "cat": "", "args": { "name": "clang-22" } },
-                { "pid": 7, "tid": 7, "ts": 100, "ph": "X", "dur": 5000, "name": "Frontend" },
-                { "pid": 7, "tid": 7, "ts": 0, "ph": "b", "cat": "Source", "id": 0, "name": "Source", "args": { "detail": "src/main.cpp" } },
-                { "pid": 7, "tid": 7, "ts": 50, "ph": "e", "cat": "Source", "id": 0, "name": "Source" },
-                { "pid": 7, "tid": 7, "ts": 5100, "ph": "X", "dur": 3000, "name": "OptModule", "args": { "detail": "src/main.cpp" } },
-                { "pid": 7, "tid": 7, "ts": 8100, "ph": "X", "dur": 2000, "name": "Backend" },
-                { "pid": 8, "tid": 8, "ts": 0, "ph": "X", "dur": 10100, "name": "Total ExecuteCompiler", "args": { "count": 1, "avg ms": 10 } }
-            ],
-            "beginningOfTime": 1785441886055364
-        }"#;
-        write_trace_file(&dir, "main.cpp.json", valid);
-        write_trace_file(&dir, "nested/second.cpp.json", valid);
-        write_trace_file(&dir, "broken.cpp.json", "{ not valid json");
-        write_trace_file(&dir, "ignored.json", valid);
+    fn glob_trace_paths_finds_only_matching_cpp_json_files() {
+        let dir = test_build_dir("glob_trace_paths");
+        write_trace_file(&dir, "main.cpp.json", "{}");
+        write_trace_file(&dir, "nested/second.cpp.json", "{}");
+        write_trace_file(&dir, "ignored.json", "{}");
+        write_trace_file(&dir, "notes.txt", "{}");
 
-        let traces = collect_build_traces(dir.to_str().unwrap()).unwrap();
+        let paths = glob_trace_paths(dir.to_str().unwrap());
         std::fs::remove_dir_all(&dir).ok();
 
-        assert_eq!(traces.len(), 2);
-        assert!(
-            traces
-                .iter()
-                .all(|t| t.source_file.as_deref() == Some("src/main.cpp"))
+        assert_eq!(paths.len(), 2);
+        let names: Vec<String> = paths
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert!(names.contains(&"main.cpp.json".to_string()));
+        assert!(names.contains(&"second.cpp.json".to_string()));
+    }
+
+    #[test]
+    fn parse_trace_file_parses_valid_json_and_ignores_invalid() {
+        let dir = test_build_dir("parse_trace_file");
+        write_trace_file(
+            &dir,
+            "main.cpp.json",
+            r#"{ "traceEvents": [], "beginningOfTime": 1785441886055364 }"#,
         );
-        // The Source span survives fusion as its own root category.
-        assert!(
-            traces
-                .iter()
-                .all(|t| t.trace_tree.roots.contains_key("Source"))
-        );
+        write_trace_file(&dir, "broken.cpp.json", "{ not valid json");
+
+        assert!(parse_trace_file(&dir.join("main.cpp.json")).is_some());
+        assert!(parse_trace_file(&dir.join("broken.cpp.json")).is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn source_file_from_trace_extracts_opt_module_detail() {
+        let trace = TraceEventFile {
+            trace_events: vec![trace_event(
+                "OptModule",
+                None,
+                "X",
+                1,
+                1,
+                None,
+                0,
+                Some(10),
+                Some("src/main.cpp"),
+            )],
+            beginning_of_time: 0,
+        };
+        assert_eq!(source_file_from_trace(&trace), "src/main.cpp");
     }
 }

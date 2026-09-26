@@ -1,6 +1,6 @@
 use build_time_insight::report::{self, Report};
 
-use build_time_insight::{analyzer, build_info, build_traces, cli};
+use build_time_insight::{analyzer, build_info, cli};
 
 fn main() -> anyhow::Result<()> {
     env_logger::init();
@@ -11,11 +11,7 @@ fn main() -> anyhow::Result<()> {
     let build_info = build_info::extract_build_info(&build_dir);
     println!("Build info: {:#?}", build_info);
 
-    let traces = build_traces::collect_build_traces(&build_dir)?;
-    for t in &traces {
-        t.trace_tree.print_tree(0);
-    }
-    let analysis_result = analyzer::analyze(traces);
+    let analysis_result = analyzer::analyze_build_dir(&build_dir);
 
     println!("Longest files to compile:");
     for analysis in analysis_result.longest_unit_compilations(10).enumerate() {

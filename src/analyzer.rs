@@ -2,10 +2,10 @@ use std::cmp::min;
 use std::collections::HashMap;
 
 use itertools::Itertools;
-use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+use rayon::iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
 
-use crate::build_traces::{FileTrace, LoopControl, TraceNode};
+use crate::build_traces::{FileTrace, LoopControl, TraceNode, TraceTree};
 use crate::raw_trace::*;
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -204,183 +204,218 @@ impl AnalysisResult {
     }
 }
 
+/// Returns `true` for C/C++ translation-unit files. Everything else that is
+/// entered during preprocessing is a header, including extension-less standard
+/// headers such as `<vector>` or `<cassert>`.
+fn is_source_file(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    [
+        ".c", ".cc", ".cpp", ".cxx", ".c++", ".cp", ".m", ".mm", ".s", ".asm",
+    ]
+    .iter()
+    .any(|ext| lower.ends_with(ext))
+}
+
+pub fn analyze_unit(trace: &FileTrace) -> (String, UnitAnalysis) {
+    let source_file = trace
+        .source_file
+        .as_deref()
+        .unwrap_or(&trace.trace_file)
+        .to_string();
+    let mut analysis = UnitAnalysis {
+        total_duration: 0,
+        frontend_duration: 0,
+        backend_duration: 0,
+        template_instantiation_duration: 0,
+        header_parse_duration: HashMap::new(),
+        header_inclusion_paths: HashMap::new(),
+        function_template_instantiations: HashMap::new(),
+        class_template_instantiations: HashMap::new(),
+    };
+    // Extract header parse durations from the "Source" tree. Clang emits a "Source"
+    // span for every entered file; every non-source file is a header, including
+    // extension-less standard headers.
+    if let Some(source_root_ids) = trace.trace_tree.roots.get(SOURCE) {
+        let mut stack: Vec<usize> = source_root_ids.to_vec();
+        while let Some(node_id) = stack.pop() {
+            let node = &trace.trace_tree.nodes[node_id];
+            let header_and_dur = node
+                .trace
+                .args
+                .as_ref()
+                .and_then(|args| args.detail.as_deref())
+                .map(|file| file.split(':').next().unwrap_or(file))
+                .filter(|file| !is_source_file(file))
+                .map(|file| (file, node.trace.dur.unwrap_or(0)));
+            if let Some((header, duration)) = header_and_dur {
+                analysis
+                    .header_parse_duration
+                    .entry(header.to_string())
+                    .and_modify(|val| *val += duration)
+                    .or_insert(duration);
+            }
+            stack.extend(node.children.iter().copied());
+        }
+    }
+    let headers_parsed = !analysis.header_parse_duration.is_empty();
+    if !headers_parsed {
+        log::debug!(
+            "Falling back to manual headers parsing duration for '{}'",
+            trace.trace_file
+        );
+    }
+
+    // Returns true when the node is nested inside another instantiation scope.
+    // Such nodes still count as individual template instantiations, but their
+    // duration must not be added to `template_instantiation_duration`, otherwise
+    // nested instantiations would be double counted.
+    let has_instantiation_ancestor = |node: &TraceNode| -> bool {
+        let mut parent = node.parent;
+        while let Some(parent_id) = parent {
+            let parent_node = &trace.trace_tree.nodes[parent_id];
+            let parent_name = &parent_node.trace.name;
+            if parent_name == INSTANTIATE_FUNCTION
+                || parent_name == INSTANTIATE_CLASS
+                || parent_name == PERFORM_PENDING_INSTANTIATIONS
+            {
+                return true;
+            }
+            parent = parent_node.parent;
+        }
+        false
+    };
+
+    trace.trace_tree.traverse(|node| {
+        if node.trace.dur.is_none() {
+            return LoopControl::Continue;
+        }
+        let duration = node.trace.dur.unwrap_or(0);
+        let name = &node.trace.name;
+        if name == TOTAL_EXECUTE_COMPILER {
+            analysis.total_duration = duration;
+            return LoopControl::Continue;
+        }
+        if name == TOTAL_FRONTEND {
+            analysis.frontend_duration = duration;
+            return LoopControl::Continue;
+        }
+        if name == TOTAL_BACKEND {
+            analysis.backend_duration = duration;
+            return LoopControl::Continue;
+        }
+        if name == INSTANTIATE_FUNCTION || name == INSTANTIATE_CLASS {
+            if let Some(template_name) = node
+                .trace
+                .args
+                .as_ref()
+                .and_then(|args| args.detail.as_deref())
+            {
+                let instantiations = if name == INSTANTIATE_FUNCTION {
+                    &mut analysis.function_template_instantiations
+                } else {
+                    &mut analysis.class_template_instantiations
+                };
+                instantiations
+                    .entry(template_name.to_string())
+                    .and_modify(|val| val.add(duration))
+                    .or_insert_with(|| TemplateInstantiation::new(duration));
+            }
+            if !has_instantiation_ancestor(node) {
+                analysis.template_instantiation_duration += duration;
+            }
+            return LoopControl::Continue;
+        }
+        if name == PERFORM_PENDING_INSTANTIATIONS {
+            if !has_instantiation_ancestor(node) {
+                analysis.template_instantiation_duration += duration;
+            }
+            return LoopControl::Continue;
+        }
+        if name == PARSE_DECL_OR_FN_DEF && !headers_parsed {
+            if let Some(header) = node
+                .trace
+                .args
+                .as_ref()
+                .and_then(|args| args.detail.as_deref())
+            {
+                let header = header.split(':').next().unwrap_or(header);
+                if !is_source_file(header) {
+                    analysis
+                        .header_parse_duration
+                        .entry(header.to_string())
+                        .and_modify(|val| *val += duration)
+                        .or_insert(duration);
+                }
+            }
+            return LoopControl::Continue;
+        }
+        LoopControl::Continue
+    });
+
+    // Collect inclusion paths for headers from the "Source" event tree.
+    // Clang emits a "Source" span (cat = "Source") for every entered file,
+    // nested inside the file that includes it. The chain from the root down
+    // to a header's "Source" node is therefore its full inclusion path.
+    // The top-level source file is dropped so that the same header-only
+    // chain (e.g. "a.h -> b.h") recurs across translation units and can be
+    // counted as the most-used inclusion chain for the header.
+    if let Some(source_root_ids) = trace.trace_tree.roots.get(SOURCE) {
+        let mut stack: Vec<(usize, Vec<String>)> =
+            source_root_ids.iter().map(|&id| (id, Vec::new())).collect();
+        while let Some((node_id, mut chain)) = stack.pop() {
+            let node = &trace.trace_tree.nodes[node_id];
+            let file = node
+                .trace
+                .args
+                .as_ref()
+                .and_then(|args| args.detail.as_deref())
+                .map(|f| f.split(':').next().unwrap_or(f).to_string());
+            if let Some(file) = file {
+                chain.push(file.clone());
+                if !is_source_file(&file) && chain.len() > 1 {
+                    let header_chain = chain[1..].join(" -> ");
+                    analysis
+                        .header_inclusion_paths
+                        .entry(file)
+                        .or_default()
+                        .entry(header_chain)
+                        .and_modify(|count| *count += 1)
+                        .or_insert(1);
+                }
+            }
+            for &child in &node.children {
+                stack.push((child, chain.clone()));
+            }
+        }
+    }
+    (source_file, analysis)
+}
+
 pub fn analyze(traces: Vec<FileTrace>) -> AnalysisResult {
-    let unit_analysis: HashMap<String, UnitAnalysis> = traces
-        .par_iter()
-        .map(|trace| {
-            let source_file = trace
-                .source_file
-                .as_deref()
-                .unwrap_or(&trace.trace_file)
-                .to_string();
-            let mut analysis = UnitAnalysis {
-                total_duration: 0,
-                frontend_duration: 0,
-                backend_duration: 0,
-                template_instantiation_duration: 0,
-                header_parse_duration: HashMap::new(),
-                header_inclusion_paths: HashMap::new(),
-                function_template_instantiations: HashMap::new(),
-                class_template_instantiations: HashMap::new(),
+    let unit_analysis: HashMap<String, UnitAnalysis> =
+        traces.par_iter().map(analyze_unit).collect();
+    AnalysisResult::from(unit_analysis)
+}
+
+/// Analyze the build directory.
+///
+/// Each worker thread processes one trace file completely (parse -> tree ->
+/// analyze) and returns only the small per-unit result, so peak memory scales
+/// with the number of worker threads.
+pub fn analyze_build_dir(build_dir: &str) -> AnalysisResult {
+    let paths = crate::build_traces::glob_trace_paths(build_dir);
+    let unit_analysis: HashMap<String, UnitAnalysis> = paths
+        .into_par_iter()
+        .filter_map(|path| {
+            let trace = crate::build_traces::parse_trace_file(&path)?;
+            let source_file = crate::build_traces::source_file_from_trace(&trace);
+            let trace_tree = TraceTree::from(trace.trace_events);
+            let file_trace = FileTrace {
+                trace_file: path.to_str()?.to_string(),
+                source_file: Some(source_file),
+                trace_tree,
             };
-            let header_sources: Vec<(&String, &Vec<usize>)> = trace
-                .trace_tree
-                .roots
-                .iter()
-                .filter(|root| root.0 == SOURCE)
-                .collect();
-            for (_, roots) in header_sources {
-                for root_id in roots {
-                if let Some(node) = trace.trace_tree.nodes.get(*root_id) {
-                        let header_and_dur = node
-                            .trace
-                            .args
-                            .as_ref()
-                            .and_then(|args| args.detail.as_deref())
-                            .map(|header| header.split(':').next().unwrap_or(header))
-                            .filter(|h| h.ends_with(".h") || h.ends_with(".hpp"))
-                            .map(|h| (h, node.trace.dur.unwrap_or(0)));
-                        if let Some((header, duration)) = header_and_dur {
-                            analysis
-                                .header_parse_duration
-                                .entry(header.to_string())
-                                .and_modify(|val| *val += duration)
-                                .or_insert(duration);
-                        }
-                    }
-                }
-            }
-            let headers_parsed = !analysis.header_parse_duration.is_empty();
-            if !headers_parsed {
-                log::info!("Headers parsing duration was not extracted from 'Sources' traces. Computing manually");
-            }
-
-            // Returns true when the node is nested inside another instantiation scope.
-            // Such nodes still count as individual template instantiations, but their
-            // duration must not be added to `template_instantiation_duration`, otherwise
-            // nested instantiations would be double counted.
-            let has_instantiation_ancestor = |node: &TraceNode| -> bool {
-                let mut parent = node.parent;
-                while let Some(parent_id) = parent {
-                    let parent_node = &trace.trace_tree.nodes[parent_id];
-                    let parent_name = &parent_node.trace.name;
-                    if parent_name == INSTANTIATE_FUNCTION
-                        || parent_name == INSTANTIATE_CLASS
-                        || parent_name == PERFORM_PENDING_INSTANTIATIONS
-                    {
-                        return true;
-                    }
-                    parent = parent_node.parent;
-                }
-                false
-            };
-
-            trace.trace_tree.traverse(|node| {
-                if node.trace.dur.is_none() {
-                    return LoopControl::Continue;
-                }
-                let duration = node.trace.dur.unwrap_or(0);
-                let name = &node.trace.name;
-                if name == TOTAL_EXECUTE_COMPILER {
-                    analysis.total_duration = duration;
-                    return LoopControl::Continue;
-                }
-                if name == TOTAL_FRONTEND {
-                    analysis.frontend_duration = duration;
-                    return LoopControl::Continue;
-                }
-                if name == TOTAL_BACKEND {
-                    analysis.backend_duration = duration;
-                    return LoopControl::Continue;
-                }
-                if name == INSTANTIATE_FUNCTION || name == INSTANTIATE_CLASS {
-                    if let Some(template_name) = node
-                        .trace
-                        .args
-                        .as_ref()
-                        .and_then(|args| args.detail.as_deref())
-                    {
-                        let instantiations = if name == INSTANTIATE_FUNCTION {
-                            &mut analysis.function_template_instantiations
-                        } else {
-                            &mut analysis.class_template_instantiations
-                        };
-                        instantiations
-                            .entry(template_name.to_string())
-                            .and_modify(|val| val.add(duration))
-                            .or_insert_with(|| TemplateInstantiation::new(duration));
-                    }
-                    if !has_instantiation_ancestor(node) {
-                        analysis.template_instantiation_duration += duration;
-                    }
-                    return LoopControl::Continue;
-                }
-                if name == PERFORM_PENDING_INSTANTIATIONS {
-                    if !has_instantiation_ancestor(node) {
-                        analysis.template_instantiation_duration += duration;
-                    }
-                    return LoopControl::Continue;
-                }
-                if name == PARSE_DECL_OR_FN_DEF && !headers_parsed {
-                    if let Some(header) = node
-                        .trace
-                        .args
-                        .as_ref()
-                        .and_then(|args| args.detail.as_deref())
-                    {
-                        let header = header.split(':').next().unwrap_or(header);
-                        if header.ends_with(".h") || header.ends_with(".hpp") {
-                            analysis
-                                .header_parse_duration
-                                .entry(header.to_string())
-                                .and_modify(|val| *val += duration)
-                                .or_insert(duration);
-                        }
-                    }
-                    return LoopControl::Continue;
-                }
-                LoopControl::Continue
-            });
-
-            // Collect inclusion paths for headers from the "Source" event tree.
-            // Clang emits a "Source" span (cat = "Source") for every entered file,
-            // nested inside the file that includes it. The chain from the root down
-            // to a header's "Source" node is therefore its full inclusion path.
-            // The top-level source file is dropped so that the same header-only
-            // chain (e.g. "a.h -> b.h") recurs across translation units and can be
-            // counted as the most-used inclusion chain for the header.
-            if let Some(source_root_ids) = trace.trace_tree.roots.get(SOURCE) {
-                let mut stack: Vec<(usize, Vec<String>)> = source_root_ids
-                    .iter()
-                    .map(|&id| (id, Vec::new()))
-                    .collect();
-                while let Some((node_id, mut chain)) = stack.pop() {
-                    let node = &trace.trace_tree.nodes[node_id];
-                    let file = node
-                        .trace
-                        .args
-                        .as_ref()
-                        .and_then(|args| args.detail.as_deref())
-                        .map(|f| f.split(':').next().unwrap_or(f).to_string());
-                    if let Some(file) = file {
-                        chain.push(file.clone());
-                        if (file.ends_with(".h") || file.ends_with(".hpp")) && chain.len() > 1 {
-                                let header_chain = chain[1..].join(" -> ");
-                                analysis
-                                    .header_inclusion_paths
-                                    .entry(file)
-                                    .or_default()
-                                    .entry(header_chain)
-                                    .and_modify(|count| *count += 1)
-                                    .or_insert(1);
-                        }
-                    }
-                    for &child in &node.children {
-                        stack.push((child, chain.clone()));
-                    }
-                }
-            }
-            (source_file, analysis)
+            Some(analyze_unit(&file_trace))
         })
         .collect();
     AnalysisResult::from(unit_analysis)
@@ -389,7 +424,6 @@ pub fn analyze(traces: Vec<FileTrace>) -> AnalysisResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::build_traces::TraceTree;
 
     #[allow(clippy::too_many_arguments)]
     fn trace_event(
@@ -469,6 +503,22 @@ mod tests {
             source_file: source_file.map(str::to_string),
             trace_tree: TraceTree::from(events),
         }
+    }
+
+    fn test_build_dir(label: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "build_time_insight_analyzer_{label}_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write_trace_file(dir: &std::path::Path, rel_path: &str, content: &str) {
+        let path = dir.join(rel_path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, content).unwrap();
     }
 
     fn unit_analysis(total_duration: i64) -> UnitAnalysis {
@@ -761,6 +811,27 @@ mod tests {
     }
 
     #[test]
+    fn analyze_counts_nested_and_extensionless_headers() {
+        let trace = file_trace(
+            Some("src/main.cpp"),
+            vec![
+                x_event("ExecuteCompiler", 1, 1, 0, 1000),
+                source_begin(1, 1, 100, "src/main.cpp"),
+                source_end(1, 1, 900),
+                source_begin(1, 1, 120, "cassert"),
+                source_end(1, 1, 800),
+                source_begin(1, 1, 130, "/usr/include/assert.h:5:1"),
+                source_end(1, 1, 700),
+            ],
+        );
+        let unit = analyze_unit(trace, "src/main.cpp");
+        // The .cpp translation unit is skipped; extension-less and nested headers count
+        assert!(!unit.header_parse_duration.contains_key("src/main.cpp"));
+        assert_eq!(unit.header_parse_duration["cassert"], 680);
+        assert_eq!(unit.header_parse_duration["/usr/include/assert.h"], 570);
+    }
+
+    #[test]
     fn analyze_falls_back_to_parse_events_for_headers() {
         let trace = file_trace(
             Some("src/main.cpp"),
@@ -822,6 +893,28 @@ mod tests {
         let trace = file_trace(None, vec![x_event("Total ExecuteCompiler", 1, 2, 0, 100)]);
         let result = analyze(vec![trace]);
         let unit = &result.unit_analysis["build/main.cpp.json"];
+        assert_eq!(unit.total_duration, 100);
+    }
+
+    #[test]
+    fn analyze_build_dir_parses_and_analyzes_trace_files() {
+        let dir = test_build_dir("analyze_build_dir");
+        let valid = r#"{
+            "traceEvents": [
+                { "pid": 7, "tid": 7, "ts": 0, "ph": "X", "dur": 1000, "name": "OptModule", "args": { "detail": "src/main.cpp" } },
+                { "pid": 7, "tid": 7, "ts": 0, "ph": "X", "dur": 100, "name": "Total ExecuteCompiler" }
+            ],
+            "beginningOfTime": 1785441886055364
+        }"#;
+        write_trace_file(&dir, "main.cpp.json", valid);
+        write_trace_file(&dir, "broken.cpp.json", "{ not valid json");
+        write_trace_file(&dir, "ignored.json", valid);
+
+        let result = analyze_build_dir(dir.to_str().unwrap());
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert_eq!(result.unit_analysis.len(), 1);
+        let unit = &result.unit_analysis["src/main.cpp"];
         assert_eq!(unit.total_duration, 100);
     }
 }
