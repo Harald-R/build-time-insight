@@ -1,0 +1,445 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Build Time Insight Report</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        .page {
+            animation: fadeIn 0.5s ease-in-out;
+        }
+
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(10px);
+            }
+
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .hidden {
+            display: none;
+        }
+    </style>
+</head>
+
+<body class="bg-gray-50 font-sans">
+    <div id="main-page" class="page p-6">
+        <h1 class="text-3xl font-bold mb-6 text-center">Build Time Insight Report</h1>
+
+        <!-- Report loader -->
+        <div class="bg-white p-4 rounded-lg shadow mb-6 flex items-center gap-4">
+            <label for="report-file" class="font-semibold">Report (.msgpack):</label>
+            <input type="file" id="report-file" accept=".msgpack" class="text-sm">
+            <div id="empty-state" class="text-gray-500 text-sm">Load a report to populate the dashboard.</div>
+        </div>
+
+        <div id="report-content" class="hidden">
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <!-- Summary -->
+                <div class="bg-white p-4 rounded-lg shadow mb-6">
+                    <h2 class="text-xl font-semibold mb-4">Build Summary</h2>
+                    <div class="flex justify-between text-gray-600">
+                        <span>Translation units</span>
+                        <span class="font-medium text-gray-900" id="summary-units">-</span>
+                    </div>
+                    <div class="flex justify-between text-gray-600">
+                        <span>Frontend duration (sum)</span>
+                        <span class="font-medium text-gray-900" id="summary-frontend">-</span>
+                    </div>
+                    <div class="flex justify-between text-gray-600">
+                        <span>Backend duration (sum)</span>
+                        <span class="font-medium text-gray-900" id="summary-backend">-</span>
+                    </div>
+                    <div class="flex justify-between text-gray-600">
+                        <span>Template instantiation (sum)</span>
+                        <span class="font-medium text-gray-900" id="summary-templates">-</span>
+                    </div>
+                    <div class="border-t border-gray-100 pt-3 flex justify-between text-base font-semibold text-gray-900">
+                        <span>Total compile time (sum)</span>
+                        <span id="summary-total">-</span>
+                    </div>
+                </div>
+                <!-- Build Configuration -->
+                <div class="bg-white p-4 rounded-lg shadow mb-6">
+                    <h2 class="text-xl font-semibold mb-4">Build Configuration</h2>
+                    <div class="flex justify-between text-gray-600">
+                        <span>Build system</span>
+                        <span class="font-medium text-gray-900" id="cfg-build-system">-</span>
+                    </div>
+                    <div class="flex justify-between text-gray-600">
+                        <span>Generator</span>
+                        <span class="font-medium text-gray-900" id="cfg-generator">-</span>
+                    </div>
+                    <div class="flex justify-between text-gray-600">
+                        <span>C++ compiler</span>
+                        <span class="font-medium text-gray-900" id="cfg-compiler">-</span>
+                    </div>
+                    <div class="flex justify-between text-gray-600">
+                        <span>Linker</span>
+                        <span class="font-medium text-gray-900" id="cfg-linker">-</span>
+                    </div>
+                    <div class="flex justify-between text-gray-600">
+                        <span>Commit</span>
+                        <span class="font-medium text-gray-900" id="cfg-commit">-</span>
+                    </div>
+                </div>
+                <!-- Report Details -->
+                <div class="bg-white p-4 rounded-lg shadow mb-6">
+                    <h2 class="text-xl font-semibold mb-4">Report Details</h2>
+                    <div class="flex justify-between text-gray-600">
+                        <span>Report file</span>
+                        <span class="font-medium text-gray-900 break-all" id="report-file-name">-</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Chart -->
+            <div class="bg-white p-4 rounded-lg shadow mb-6">
+                <h2 class="text-xl font-semibold mb-4">Compile time per translation unit (top 20)</h2>
+                <canvas id="ganttChart"></canvas>
+            </div>
+
+            <!-- Tables Row -->
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-6">
+                <!-- Longest units -->
+                <div class="bg-white p-4 rounded-lg shadow">
+                    <h2 class="text-lg font-semibold mb-2">Longest units to compile</h2>
+                    <table class="w-full">
+                        <thead>
+                            <tr class="border-b">
+                                <th class="text-left p-2">#</th>
+                                <th class="text-left p-2">Unit</th>
+                                <th class="text-left p-2">Duration</th>
+                            </tr>
+                        </thead>
+                        <tbody id="table-body-longest-units"></tbody>
+                    </table>
+                </div>
+
+                <!-- Longest headers -->
+                <div class="bg-white p-4 rounded-lg shadow">
+                    <h2 class="text-lg font-semibold mb-2">Longest headers to parse</h2>
+                    <table class="w-full">
+                        <thead>
+                            <tr class="border-b">
+                                <th class="text-left p-2">#</th>
+                                <th class="text-left p-2">Header</th>
+                                <th class="text-left p-2">Duration</th>
+                                <th class="text-left p-2">Inclusions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="table-body-longest-headers"></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <!-- Largest template instantiations -->
+            <div class="bg-white p-4 rounded-lg shadow mb-6">
+                <h2 class="text-lg font-semibold mb-2">Largest template instantiations (top 50)</h2>
+                <table class="w-full">
+                    <thead>
+                        <tr class="border-b">
+                            <th class="text-left p-2">#</th>
+                            <th class="text-left p-2">Kind</th>
+                            <th class="text-left p-2">Template</th>
+                            <th class="text-left p-2">Duration</th>
+                            <th class="text-left p-2">Instantiations</th>
+                        </tr>
+                    </thead>
+                    <tbody id="table-body-templates"></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- Detail Page (hidden by default) -->
+    <div id="detail-page" class="page hidden p-6">
+        <button onclick="showMain()" class="bg-blue-500 text-white px-4 py-2 rounded mb-4">Back</button>
+        <div id="detail-content" class="bg-white p-4 rounded-lg shadow"></div>
+    </div>
+
+    <script>
+        // Minimal MessagePack decoder (supports the subset emitted by rmp-serde
+        // with with_struct_map(): maps/arrays/strings and integer/float types).
+        function decodeMsgpack(buffer) {
+            const view = new DataView(buffer);
+            let offset = 0;
+            const textDecoder = new TextDecoder();
+
+            function bytes(len) { const b = new Uint8Array(buffer, offset, len); offset += len; return b; }
+            function str(len) { return textDecoder.decode(bytes(len)); }
+            function u8() { return view.getUint8(offset++); }
+            function u16() { const v = view.getUint16(offset); offset += 2; return v; }
+            function u32() { const v = view.getUint32(offset); offset += 4; return v; }
+            function u64() { const hi = u32(), lo = u32(); return Number((BigInt(hi) << 32n) | BigInt(lo)); }
+            function i64() { const hi = view.getInt32(offset), lo = view.getUint32(offset + 4); offset += 8; return Number((BigInt(hi) << 32n) | BigInt(lo)); }
+
+            function decode() {
+                const b = u8();
+                if (b <= 0x7f) return b;                       // positive fixint
+                if (b >= 0xe0) return b - 0x100;               // negative fixint
+                if (b >= 0xa0 && b <= 0xbf) return str(b & 0x1f); // fixstr
+                if (b >= 0x90 && b <= 0x9f) {                  // fixarray
+                    const arr = [];
+                    for (let i = 0, n = b & 0x0f; i < n; i++) arr.push(decode());
+                    return arr;
+                }
+                if (b >= 0x80 && b <= 0x8f) {                  // fixmap
+                    const obj = {};
+                    for (let i = 0, n = b & 0x0f; i < n; i++) { const k = decode(); obj[k] = decode(); }
+                    return obj;
+                }
+                switch (b) {
+                    case 0xc0: return null;
+                    case 0xc2: return false;
+                    case 0xc3: return true;
+                    case 0xc4: offset += u8(); return undefined;  // bin8
+                    case 0xc5: offset += u16(); return undefined; // bin16
+                    case 0xc6: offset += u32(); return undefined; // bin32
+                    case 0xca: { const v = view.getFloat32(offset); offset += 4; return v; }
+                    case 0xcb: { const v = view.getFloat64(offset); offset += 8; return v; }
+                    case 0xcc: return u8();
+                    case 0xcd: return u16();
+                    case 0xce: return u32();
+                    case 0xcf: return u64();
+                    case 0xd0: return view.getInt8(offset++);
+                    case 0xd1: { const v = view.getInt16(offset); offset += 2; return v; }
+                    case 0xd2: { const v = view.getInt32(offset); offset += 4; return v; }
+                    case 0xd3: return i64();
+                    case 0xd9: return str(u8());
+                    case 0xda: return str(u16());
+                    case 0xdb: return str(u32());
+                    case 0xdc: { const arr = []; for (let i = 0, n = u16(); i < n; i++) arr.push(decode()); return arr; }
+                    case 0xdd: { const arr = []; for (let i = 0, n = u32(); i < n; i++) arr.push(decode()); return arr; }
+                    case 0xde: { const obj = {}; for (let i = 0, n = u16(); i < n; i++) { const k = decode(); obj[k] = decode(); } return obj; }
+                    case 0xdf: { const obj = {}; for (let i = 0, n = u32(); i < n; i++) { const k = decode(); obj[k] = decode(); } return obj; }
+                    // ext types: skip payload
+                    case 0xc7: offset += u8() + 1; return undefined;
+                    case 0xc8: offset += u16() + 1; return undefined;
+                    case 0xc9: offset += u32() + 1; return undefined;
+                    case 0xd4: offset += 2; return undefined;
+                    case 0xd5: offset += 3; return undefined;
+                    case 0xd6: offset += 5; return undefined;
+                    case 0xd7: offset += 9; return undefined;
+                    case 0xd8: offset += 17; return undefined;
+                    default: throw new Error('Unsupported msgpack byte 0x' + b.toString(16));
+                }
+            }
+            return decode();
+        }
+
+        function fmtDuration(us) {
+            if (us >= 1e6) return (us / 1e6).toFixed(2) + 's';
+            if (us >= 1e3) return (us / 1e3).toFixed(1) + 'ms';
+            return us + 'us';
+        }
+
+        function esc(s) {
+            return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+        }
+
+        function setText(id, value) {
+            document.getElementById(id).textContent = value;
+        }
+
+        let reportData = null;
+        let chart = null;
+
+        document.getElementById('report-file').addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = () => {
+                try {
+                    reportData = decodeMsgpack(reader.result);
+                    render(reportData);
+                    setText('report-file-name', file.name);
+                } catch (err) {
+                    alert('Failed to parse report: ' + err.message);
+                }
+            };
+            reader.readAsArrayBuffer(file);
+        });
+
+        function render(report) {
+            document.getElementById('empty-state').classList.add('hidden');
+            document.getElementById('report-content').classList.remove('hidden');
+
+            const units = report.analysis.unit_analysis || {};
+            const headers = report.analysis.header_analysis || {};
+            const fnTemplates = report.analysis.function_template_instantiations || {};
+            const classTemplates = report.analysis.class_template_instantiations || {};
+
+            let frontend = 0, backend = 0, total = 0, templates = 0;
+            for (const u of Object.values(units)) {
+                frontend += u.frontend_duration || 0;
+                backend += u.backend_duration || 0;
+                total += u.total_duration || 0;
+                templates += u.template_instantiation_duration || 0;
+            }
+            setText('summary-units', Object.keys(units).length);
+            setText('summary-frontend', fmtDuration(frontend));
+            setText('summary-backend', fmtDuration(backend));
+            setText('summary-templates', fmtDuration(templates));
+            setText('summary-total', fmtDuration(total));
+
+            renderBuildConfig(report.build_info || {});
+
+            const sortedUnits = Object.entries(units).sort((a, b) => b[1].total_duration - a[1].total_duration);
+            renderChart(sortedUnits.slice(0, 20));
+            renderUnitsTable(sortedUnits);
+            renderHeadersTable(Object.entries(headers).sort((a, b) => b[1].parse_duration - a[1].parse_duration));
+            renderTemplatesTable([
+                ...Object.entries(fnTemplates).map(([name, t]) => [name, t, 'function']),
+                ...Object.entries(classTemplates).map(([name, t]) => [name, t, 'class']),
+            ].sort((a, b) => b[1].total_duration - a[1].total_duration));
+        }
+
+        function toolLabel(tool) {
+            return tool && tool.name ? tool.name + (tool.version ? ' ' + tool.version : '') : '-';
+        }
+
+        function renderBuildConfig(bi) {
+            const tc = bi.toolchain;
+            setText('cfg-build-system', tc && tc.build_system ? toolLabel(tc.build_system) : '-');
+            setText('cfg-generator', tc && tc.generator ? toolLabel(tc.generator) : '-');
+            setText('cfg-compiler', tc && tc.cxx_compiler ? toolLabel(tc.cxx_compiler) : '-');
+            setText('cfg-linker', tc && tc.linker ? toolLabel(tc.linker) : '-');
+            setText('cfg-commit', bi.git_commit || '-');
+        }
+
+        function renderChart(units) {
+            const ctx = document.getElementById('ganttChart').getContext('2d');
+            if (chart) chart.destroy();
+            chart = new Chart(ctx, {
+                type: 'bar',
+                data: {
+                    labels: units.map(([path]) => path.split('/').pop()),
+                    datasets: [{
+                        label: 'Duration (s)',
+                        data: units.map(([, u]) => (u.total_duration || 0) / 1e6),
+                        backgroundColor: 'rgba(59, 130, 246, 0.7)',
+                        borderColor: 'rgba(59, 130, 246, 1)',
+                        borderWidth: 1,
+                        borderRadius: 4,
+                        barThickness: 14,
+                    }]
+                },
+                options: {
+                    indexAxis: 'y',
+                    responsive: true,
+                    scales: {
+                        x: { beginAtZero: true, title: { display: true, text: 'Duration (s)' }, grid: { color: 'rgba(0,0,0,0.1)' } },
+                        y: { grid: { display: false } }
+                    },
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: {
+                            callbacks: {
+                                label: (c) => 'Duration: ' + fmtDuration(units[c.dataIndex][1].total_duration)
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        function renderUnitsTable(sortedUnits) {
+            document.getElementById('table-body-longest-units').innerHTML = sortedUnits.map(([path, u], i) => `
+                <tr class="border-b hover:bg-gray-100 cursor-pointer" onclick="showUnitDetail(this.dataset.unit)" data-unit="${esc(path)}">
+                    <td class="p-2">${i + 1}</td>
+                    <td class="p-2 break-all">${esc(path)}</td>
+                    <td class="p-2">${fmtDuration(u.total_duration)}</td>
+                </tr>`).join('');
+        }
+
+        function renderHeadersTable(sortedHeaders) {
+            document.getElementById('table-body-longest-headers').innerHTML = sortedHeaders.map(([header, h], i) => {
+                const chains = Object.entries(h.inclusion_paths || {})
+                    .sort((a, b) => b[1] - a[1])
+                    .slice(0, 3)
+                    .map(([chain, count]) => `<div class="text-xs text-gray-500">via ${esc(chain)} (${count}x)</div>`)
+                    .join('');
+                return `
+                <tr class="border-b hover:bg-gray-100">
+                    <td class="p-2">${i + 1}</td>
+                    <td class="p-2 break-all">${esc(header)}${chains}</td>
+                    <td class="p-2">${fmtDuration(h.parse_duration)}</td>
+                    <td class="p-2">${h.num_inclusions}</td>
+                </tr>`;
+            }).join('');
+        }
+
+        function renderTemplatesTable(sortedTemplates) {
+            document.getElementById('table-body-templates').innerHTML = sortedTemplates.slice(0, 50)
+                .map(([name, t, kind], i) => `
+                <tr class="border-b hover:bg-gray-100">
+                    <td class="p-2">${i + 1}</td>
+                    <td class="p-2">${kind}</td>
+                    <td class="p-2 break-all">${esc(name)}</td>
+                    <td class="p-2">${fmtDuration(t.total_duration)}</td>
+                    <td class="p-2">${t.num_instantiations}</td>
+                </tr>`).join('');
+        }
+
+        function renderKvTable(entries, emptyText) {
+            if (!entries.length) return `<div class="text-gray-500">${emptyText}</div>`;
+            return `<table class="w-full text-sm"><thead><tr class="border-b"><th class="text-left p-1">Name</th><th class="text-left p-1">Value</th></tr></thead><tbody>` +
+                entries.map(([name, value]) =>
+                    `<tr class="border-b"><td class="p-1 break-all">${esc(name)}</td><td class="p-1">${value}</td></tr>`).join('') +
+                `</tbody></table>`;
+        }
+
+        function showUnitDetail(unitPath) {
+            const u = reportData && reportData.analysis.unit_analysis[unitPath];
+            if (!u) return;
+            document.getElementById('main-page').classList.add('hidden');
+            document.getElementById('detail-page').classList.remove('hidden');
+
+            const headerParses = Object.entries(u.header_parse_duration || {}).sort((a, b) => b[1] - a[1]).slice(0, 20)
+                .map(([h, d]) => [h, fmtDuration(d)]);
+            const fnInsts = Object.entries(u.function_template_instantiations || {}).sort((a, b) => b[1].total_duration - a[1].total_duration).slice(0, 20)
+                .map(([name, t]) => [name, `${fmtDuration(t.total_duration)} (${t.num_instantiations}x)`]);
+            const classInsts = Object.entries(u.class_template_instantiations || {}).sort((a, b) => b[1].total_duration - a[1].total_duration).slice(0, 20)
+                .map(([name, t]) => [name, `${fmtDuration(t.total_duration)} (${t.num_instantiations}x)`]);
+
+            document.getElementById('detail-content').innerHTML = `
+                <h2 class="text-2xl font-bold mb-2 break-all">${esc(unitPath)}</h2>
+                <div class="grid grid-cols-2 md:grid-cols-4 gap-2 mb-4 text-sm">
+                    <div class="p-2 bg-gray-50 rounded"><div class="text-gray-500">Total</div><div class="font-medium">${fmtDuration(u.total_duration)}</div></div>
+                    <div class="p-2 bg-gray-50 rounded"><div class="text-gray-500">Frontend</div><div class="font-medium">${fmtDuration(u.frontend_duration)}</div></div>
+                    <div class="p-2 bg-gray-50 rounded"><div class="text-gray-500">Backend</div><div class="font-medium">${fmtDuration(u.backend_duration)}</div></div>
+                    <div class="p-2 bg-gray-50 rounded"><div class="text-gray-500">Template inst.</div><div class="font-medium">${fmtDuration(u.template_instantiation_duration)}</div></div>
+                </div>
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div>
+                        <h3 class="text-lg font-semibold mb-2">Longest headers to parse</h3>
+                        ${renderKvTable(headerParses, 'None')}
+                    </div>
+                    <div>
+                        <h3 class="text-lg font-semibold mb-2">Function template instantiations</h3>
+                        ${renderKvTable(fnInsts, 'None')}
+                    </div>
+                    <div>
+                        <h3 class="text-lg font-semibold mb-2">Class template instantiations</h3>
+                        ${renderKvTable(classInsts, 'None')}
+                    </div>
+                </div>`;
+        }
+
+        function showMain() {
+            document.getElementById('detail-page').classList.add('hidden');
+            document.getElementById('main-page').classList.remove('hidden');
+        }
+    </script>
+</body>
+
+</html>
