@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::thread;
 
-use clap::Parser;
+use clap::{Args, Parser, Subcommand};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -9,6 +9,29 @@ use clap::Parser;
     about = "Analyze clang -ftime-trace output to find C++ build-time bottlenecks"
 )]
 pub struct Cli {
+    #[command(subcommand)]
+    pub command: Command,
+
+    /// Increase logging verbosity; repeat for more detail
+    #[arg(short, long, global = true, action = clap::ArgAction::Count)]
+    pub verbose: u8,
+
+    /// Only log errors
+    #[arg(short, long, global = true)]
+    pub quiet: bool,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum Command {
+    /// Analyze a build directory and write a portable report
+    Analyze(AnalyzeArgs),
+
+    /// Compare two reports and print per-unit duration changes
+    Compare(CompareArgs),
+}
+
+#[derive(Debug, Args)]
+pub struct AnalyzeArgs {
     /// Build directory containing the clang `-ftime-trace` JSON files
     #[arg(value_parser = validate_build_dir)]
     pub build_dir: PathBuf,
@@ -28,31 +51,20 @@ pub struct Cli {
     /// Glob patterns of trace files to exclude from the analysis; may be repeated
     #[arg(short, long)]
     pub exclude: Vec<String>,
+}
 
-    /// Increase logging verbosity; repeat for more detail
-    #[arg(short, long, action = clap::ArgAction::Count)]
-    pub verbose: u8,
+#[derive(Debug, Args)]
+pub struct CompareArgs {
+    /// Baseline report file
+    pub base: PathBuf,
 
-    /// Only log errors
-    #[arg(short, long)]
-    pub quiet: bool,
+    /// Report file to compare against the baseline
+    pub target: PathBuf,
 }
 
 impl Cli {
     pub fn parse() -> Self {
         <Self as Parser>::parse()
-    }
-
-    /// Resolve the number of worker threads, defaulting to the number of
-    /// available system threads and never exceeding it.
-    pub fn jobs(&self) -> usize {
-        let system = default_jobs();
-        self.jobs.unwrap_or(system).min(system)
-    }
-
-    /// Resolve the number of entries per top-N list.
-    pub fn limit(&self) -> usize {
-        self.limit.unwrap_or(15)
     }
 
     /// Resolve the log filter level from the verbosity and quiet flags.
@@ -66,6 +78,20 @@ impl Cli {
                 _ => log::LevelFilter::Trace,
             }
         }
+    }
+}
+
+impl AnalyzeArgs {
+    /// Resolve the number of worker threads, defaulting to the number of
+    /// available system threads and never exceeding it.
+    pub fn jobs(&self) -> usize {
+        let system = default_jobs();
+        self.jobs.unwrap_or(system).min(system)
+    }
+
+    /// Resolve the number of entries per top-N list.
+    pub fn limit(&self) -> usize {
+        self.limit.unwrap_or(10)
     }
 }
 
@@ -109,83 +135,107 @@ fn validate_build_dir(s: &str) -> Result<PathBuf, String> {
 mod tests {
     use super::*;
 
+    fn analyze_args(cli: &Cli) -> &AnalyzeArgs {
+        match &cli.command {
+            Command::Analyze(args) => args,
+            _ => panic!("expected Analyze subcommand"),
+        }
+    }
+
     #[test]
-    fn test_missing_argument_returns_error() {
+    fn test_missing_command_returns_error() {
         let err = Cli::try_parse_from(["build-time-insight"]).unwrap_err();
-        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+        );
     }
 
     #[test]
     fn test_non_existent_path_returns_error() {
-        let err = Cli::try_parse_from(["build-time-insight", "/test/invalid/path"]).unwrap_err();
+        let err = Cli::try_parse_from(["build-time-insight", "analyze", "/test/invalid/path"])
+            .unwrap_err();
         assert!(err.to_string().contains("does not exist"));
     }
 
     #[test]
-    fn test_valid_directory_succeeds() {
-        let cli = Cli::try_parse_from(["build-time-insight", "src"]).unwrap();
-        assert_eq!(cli.build_dir, PathBuf::from("src"));
+    fn test_analyze_valid_directory_succeeds() {
+        let cli = Cli::try_parse_from(["build-time-insight", "analyze", "src"]).unwrap();
+        assert_eq!(analyze_args(&cli).build_dir, PathBuf::from("src"));
     }
 
     #[test]
     fn test_jobs_argument_controls_thread_count() {
-        let cli = Cli::try_parse_from(["build-time-insight", "src", "-j", "2"]).unwrap();
-        assert_eq!(cli.jobs(), 2);
+        let cli = Cli::try_parse_from(["build-time-insight", "analyze", "src", "-j", "2"]).unwrap();
+        assert_eq!(analyze_args(&cli).jobs(), 2);
     }
 
     #[test]
     fn test_jobs_defaults_to_all_available_threads() {
-        let cli = Cli::try_parse_from(["build-time-insight", "src"]).unwrap();
-        assert_eq!(cli.jobs(), default_jobs());
+        let cli = Cli::try_parse_from(["build-time-insight", "analyze", "src"]).unwrap();
+        assert_eq!(analyze_args(&cli).jobs(), default_jobs());
     }
 
     #[test]
     fn test_jobs_is_capped_at_available_threads() {
-        let cli = Cli::try_parse_from(["build-time-insight", "src", "-j", "999999"]).unwrap();
-        assert_eq!(cli.jobs(), default_jobs());
+        let cli =
+            Cli::try_parse_from(["build-time-insight", "analyze", "src", "-j", "999999"]).unwrap();
+        assert_eq!(analyze_args(&cli).jobs(), default_jobs());
     }
 
     #[test]
     fn test_jobs_rejects_zero() {
-        let err = Cli::try_parse_from(["build-time-insight", "src", "-j", "0"]).unwrap_err();
+        let err =
+            Cli::try_parse_from(["build-time-insight", "analyze", "src", "-j", "0"]).unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
     }
 
     #[test]
     fn test_output_argument_sets_report_path() {
-        let cli =
-            Cli::try_parse_from(["build-time-insight", "src", "-o", "/tmp/r.msgpack"]).unwrap();
-        assert_eq!(cli.output, Some(PathBuf::from("/tmp/r.msgpack")));
+        let cli = Cli::try_parse_from([
+            "build-time-insight",
+            "analyze",
+            "src",
+            "-o",
+            "/tmp/r.msgpack",
+        ])
+        .unwrap();
+        assert_eq!(
+            analyze_args(&cli).output,
+            Some(PathBuf::from("/tmp/r.msgpack"))
+        );
     }
 
     #[test]
     fn test_limit_argument_controls_top_n() {
-        let cli = Cli::try_parse_from(["build-time-insight", "src", "--limit", "5"]).unwrap();
-        assert_eq!(cli.limit(), 5);
+        let cli =
+            Cli::try_parse_from(["build-time-insight", "analyze", "src", "--limit", "5"]).unwrap();
+        assert_eq!(analyze_args(&cli).limit(), 5);
     }
 
     #[test]
-    fn test_limit_defaults_to_fifteen() {
-        let cli = Cli::try_parse_from(["build-time-insight", "src"]).unwrap();
-        assert_eq!(cli.limit(), 15);
+    fn test_limit_defaults_to_ten() {
+        let cli = Cli::try_parse_from(["build-time-insight", "analyze", "src"]).unwrap();
+        assert_eq!(analyze_args(&cli).limit(), 10);
     }
 
     #[test]
     fn test_limit_rejects_zero() {
-        let err = Cli::try_parse_from(["build-time-insight", "src", "--limit", "0"]).unwrap_err();
+        let err = Cli::try_parse_from(["build-time-insight", "analyze", "src", "--limit", "0"])
+            .unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
     }
 
     #[test]
     fn test_verbose_counts_occurrences() {
-        let cli = Cli::try_parse_from(["build-time-insight", "src", "-vv"]).unwrap();
+        let cli = Cli::try_parse_from(["build-time-insight", "analyze", "src", "-vv"]).unwrap();
         assert_eq!(cli.verbose, 2);
         assert_eq!(cli.log_level(), log::LevelFilter::Trace);
     }
 
     #[test]
     fn test_quiet_sets_error_level() {
-        let cli = Cli::try_parse_from(["build-time-insight", "src", "-q"]).unwrap();
+        let cli = Cli::try_parse_from(["build-time-insight", "analyze", "src", "-q"]).unwrap();
         assert!(cli.quiet);
         assert_eq!(cli.log_level(), log::LevelFilter::Error);
     }
@@ -194,6 +244,7 @@ mod tests {
     fn test_exclude_accepts_multiple_patterns() {
         let cli = Cli::try_parse_from([
             "build-time-insight",
+            "analyze",
             "src",
             "-e",
             "*tests*",
@@ -202,8 +253,25 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(
-            cli.exclude,
+            analyze_args(&cli).exclude,
             vec!["*tests*".to_string(), "*third*".to_string()]
         );
+    }
+
+    #[test]
+    fn test_compare_accepts_two_reports() {
+        let cli = Cli::try_parse_from([
+            "build-time-insight",
+            "compare",
+            "base.msgpack",
+            "target.msgpack",
+        ])
+        .unwrap();
+        let args = match &cli.command {
+            Command::Compare(args) => args,
+            _ => panic!("expected Compare subcommand"),
+        };
+        assert_eq!(args.base, PathBuf::from("base.msgpack"));
+        assert_eq!(args.target, PathBuf::from("target.msgpack"));
     }
 }

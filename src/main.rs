@@ -9,16 +9,23 @@ fn main() -> anyhow::Result<()> {
     )
     .init();
 
-    let build_dir = cli.build_dir.to_string_lossy().into_owned();
-    let jobs = cli.jobs();
-    let limit = cli.limit();
+    match cli.command {
+        cli::Command::Analyze(args) => run_analyze(&args),
+        cli::Command::Compare(args) => run_compare(&args),
+    }
+}
+
+fn run_analyze(args: &cli::AnalyzeArgs) -> anyhow::Result<()> {
+    let build_dir = args.build_dir.to_string_lossy().into_owned();
+    let jobs = args.jobs();
+    let limit = args.limit();
     log::info!("Build dir: {}", build_dir);
     log::info!("Jobs: {}", jobs);
 
     let build_info = build_info::extract_build_info(&build_dir);
     log::info!("Build info: {:#?}", build_info);
 
-    let analysis_result = analyzer::analyze_build_dir(&build_dir, jobs, &cli.exclude);
+    let analysis_result = analyzer::analyze_build_dir(&build_dir, jobs, &args.exclude);
 
     println!("Longest files to compile:");
     for analysis in analysis_result.longest_unit_compilations(limit).enumerate() {
@@ -89,11 +96,22 @@ fn main() -> anyhow::Result<()> {
     }
 
     let report = Report::new(build_info, analysis_result);
-    let path = cli
+    let path = args
         .output
         .clone()
         .unwrap_or_else(|| std::env::temp_dir().join("report.msgpack"));
     report::write_report(&report, &path)?;
     log::info!("Wrote report to {}", path.display());
+    Ok(())
+}
+
+fn run_compare(args: &cli::CompareArgs) -> anyhow::Result<()> {
+    let base = report::read_report(&args.base)?;
+    let target = report::read_report(&args.target)?;
+    let diffs = report::unit_duration_diffs(&base, &target);
+    println!("Per-unit total duration changes (positive = slower):");
+    for (unit, diff) in &diffs {
+        println!("{unit}: {diff} us");
+    }
     Ok(())
 }
