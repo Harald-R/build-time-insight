@@ -414,8 +414,8 @@ pub fn analyze(traces: Vec<FileTrace>) -> AnalysisResult {
 /// Each worker thread processes one trace file completely (parse -> tree ->
 /// analyze) and returns only the small per-unit result, so peak memory scales
 /// with the number of worker threads.
-pub fn analyze_build_dir(build_dir: &str, jobs: usize) -> AnalysisResult {
-    let paths = crate::build_traces::glob_trace_paths(build_dir);
+pub fn analyze_build_dir(build_dir: &str, jobs: usize, excludes: &[String]) -> AnalysisResult {
+    let paths = crate::build_traces::glob_trace_paths(build_dir, excludes);
     let unit_analysis: HashMap<String, UnitAnalysis> = build_pool(jobs).install(move || {
         paths
             .into_par_iter()
@@ -924,7 +924,7 @@ mod tests {
         write_trace_file(&dir, "broken.cpp.json", "{ not valid json");
         write_trace_file(&dir, "ignored.json", valid);
 
-        let result = analyze_build_dir(dir.to_str().unwrap(), 2);
+        let result = analyze_build_dir(dir.to_str().unwrap(), 2, &[]);
         std::fs::remove_dir_all(&dir).ok();
 
         assert_eq!(result.unit_analysis.len(), 1);

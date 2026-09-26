@@ -12,13 +12,40 @@ fn deserialize_trace_event_file<R: Read>(reader: R) -> Result<TraceEventFile, se
     serde_json::from_reader(reader)
 }
 
-/// Glob the build directory for `-ftime-trace` files
-pub fn glob_trace_paths(build_dir: &str) -> Vec<PathBuf> {
+/// Glob the build directory for `-ftime-trace` files, skipping any that match
+/// one of the exclude patterns (matched relative to `build_dir`). A pattern
+/// matching a parent directory also excludes everything below it.
+pub fn glob_trace_paths(build_dir: &str, excludes: &[String]) -> Vec<PathBuf> {
+    let exclude_patterns: Vec<glob::Pattern> = excludes
+        .iter()
+        .filter_map(|pattern| match glob::Pattern::new(pattern) {
+            Ok(pattern) => Some(pattern),
+            Err(e) => {
+                log::warn!("Invalid exclude pattern '{}': {}", pattern, e);
+                None
+            }
+        })
+        .collect();
+    let is_excluded = |path: &Path| {
+        let relative = path.strip_prefix(build_dir).unwrap_or(path);
+        exclude_patterns.iter().any(|p| {
+            relative
+                .ancestors()
+                .any(|ancestor| p.matches_path(ancestor))
+        })
+    };
     let pattern = build_dir.to_owned() + "/**/*.cpp.json";
     let paths: Vec<PathBuf> = match glob::glob(&pattern) {
         Ok(paths) => paths
             .filter_map(|entry| match entry {
-                Ok(path) => Some(path),
+                Ok(path) => {
+                    if is_excluded(&path) {
+                        log::debug!("Excluding '{}'", path.display());
+                        None
+                    } else {
+                        Some(path)
+                    }
+                }
                 Err(e) => {
                     log::warn!("Error while globbing '{}': {}", pattern, e);
                     None
@@ -777,7 +804,7 @@ mod tests {
         write_trace_file(&dir, "ignored.json", "{}");
         write_trace_file(&dir, "notes.txt", "{}");
 
-        let paths = glob_trace_paths(dir.to_str().unwrap());
+        let paths = glob_trace_paths(dir.to_str().unwrap(), &[]);
         std::fs::remove_dir_all(&dir).ok();
 
         assert_eq!(paths.len(), 2);
@@ -787,6 +814,23 @@ mod tests {
             .collect();
         assert!(names.contains(&"main.cpp.json".to_string()));
         assert!(names.contains(&"second.cpp.json".to_string()));
+    }
+
+    #[test]
+    fn glob_trace_paths_excludes_matching_files() {
+        let dir = test_build_dir("glob_trace_paths_excludes");
+        write_trace_file(&dir, "main.cpp.json", "{}");
+        write_trace_file(&dir, "third_party/external.cpp.json", "{}");
+        write_trace_file(&dir, "tests/test.cpp.json", "{}");
+
+        let paths = glob_trace_paths(dir.to_str().unwrap(), &["third_party".into()]);
+        std::fs::remove_dir_all(&dir).ok();
+
+        let names: Vec<String> = paths
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["main.cpp.json", "test.cpp.json"]);
     }
 
     #[test]

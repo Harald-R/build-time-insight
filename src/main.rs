@@ -18,7 +18,7 @@ fn main() -> anyhow::Result<()> {
     let build_info = build_info::extract_build_info(&build_dir);
     log::info!("Build info: {:#?}", build_info);
 
-    let analysis_result = analyzer::analyze_build_dir(&build_dir, jobs);
+    let analysis_result = analyzer::analyze_build_dir(&build_dir, jobs, &cli.exclude);
 
     println!("Longest files to compile:");
     for analysis in analysis_result.longest_unit_compilations(limit).enumerate() {

@@ -25,6 +25,10 @@ pub struct Cli {
     #[arg(short, long, value_parser = parse_limit)]
     pub limit: Option<usize>,
 
+    /// Glob patterns of trace files to exclude from the analysis; may be repeated
+    #[arg(short, long)]
+    pub exclude: Vec<String>,
+
     /// Increase logging verbosity; repeat for more detail
     #[arg(short, long, action = clap::ArgAction::Count)]
     pub verbose: u8,
@@ -184,5 +188,22 @@ mod tests {
         let cli = Cli::try_parse_from(["build-time-insight", "src", "-q"]).unwrap();
         assert!(cli.quiet);
         assert_eq!(cli.log_level(), log::LevelFilter::Error);
+    }
+
+    #[test]
+    fn test_exclude_accepts_multiple_patterns() {
+        let cli = Cli::try_parse_from([
+            "build-time-insight",
+            "src",
+            "-e",
+            "*tests*",
+            "-e",
+            "*third*",
+        ])
+        .unwrap();
+        assert_eq!(
+            cli.exclude,
+            vec!["*tests*".to_string(), "*third*".to_string()]
+        );
     }
 }
