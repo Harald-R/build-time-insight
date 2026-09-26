@@ -5,7 +5,7 @@ use build_time_insight::{analyzer, build_info, cli};
 fn main() -> anyhow::Result<()> {
     env_logger::init();
 
-    let build_dir = cli::parse_dir_arg()?;
+    let build_dir = cli::parse_dir_arg();
     println!("Build dir: {}", build_dir);
 
     let build_info = build_info::extract_build_info(&build_dir);
