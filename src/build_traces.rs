@@ -26,7 +26,7 @@ pub fn glob_trace_paths(build_dir: &str) -> Vec<PathBuf> {
             })
             .collect(),
         Err(e) => {
-            eprintln!("Glob pattern error: {}", e);
+            log::error!("Glob pattern error: {}", e);
             return Vec::new();
         }
     };
@@ -277,7 +277,7 @@ impl TraceTree {
     fn print_children(&self, node_id: usize, depth: usize) {
         if let Some(node) = self.nodes.get(node_id) {
             let indent = " ".repeat(depth);
-            println!(
+            log::trace!(
                 "{}{}->{} {}->{}us ({:?})",
                 depth,
                 indent,
@@ -294,7 +294,7 @@ impl TraceTree {
 
     pub fn print_tree(&self, depth: usize) {
         for (cat, roots) in self.roots.iter() {
-            println!("Category '{cat}'");
+            log::trace!("Category '{cat}'");
             for root_id in roots {
                 self.print_children(*root_id, depth);
             }

@@ -8,11 +8,11 @@ fn main() -> anyhow::Result<()> {
     let cli = cli::Cli::parse();
     let build_dir = cli.build_dir.to_string_lossy().into_owned();
     let jobs = cli.jobs();
-    println!("Build dir: {}", build_dir);
-    println!("Jobs: {}", jobs);
+    log::info!("Build dir: {}", build_dir);
+    log::info!("Jobs: {}", jobs);
 
     let build_info = build_info::extract_build_info(&build_dir);
-    println!("Build info: {:#?}", build_info);
+    log::info!("Build info: {:#?}", build_info);
 
     let analysis_result = analyzer::analyze_build_dir(&build_dir, jobs);
 
@@ -87,5 +87,6 @@ fn main() -> anyhow::Result<()> {
     let report = Report::new(build_info, analysis_result);
     let path = std::env::temp_dir().join("report.msgpack");
     report::write_report(&report, &path)?;
+    log::info!("Wrote report to {}", path.display());
     Ok(())
 }
