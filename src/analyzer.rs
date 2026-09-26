@@ -59,6 +59,15 @@ impl TemplateInstantiation {
         self.total_duration += other.total_duration;
         self.num_instantiations += other.num_instantiations;
     }
+
+    /// Average duration per instantiation, in microseconds
+    pub fn avg_duration(&self) -> i64 {
+        if self.num_instantiations == 0 {
+            0
+        } else {
+            self.total_duration / self.num_instantiations
+        }
+    }
 }
 
 impl UnitAnalysis {
@@ -85,6 +94,17 @@ pub struct HeaderAnalysis {
     pub num_inclusions: i64,
     #[serde(serialize_with = "crate::report::serialize_sorted_map")]
     pub inclusion_paths: HashMap<String, i64>,
+}
+
+impl HeaderAnalysis {
+    /// Average parse time per inclusion, in microseconds
+    pub fn avg_inclusion_time(&self) -> i64 {
+        if self.num_inclusions == 0 {
+            0
+        } else {
+            self.parse_duration / self.num_inclusions
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -600,6 +620,34 @@ mod tests {
         inst.merge(&TemplateInstantiation::new(20));
         assert_eq!(inst.total_duration, 30);
         assert_eq!(inst.num_instantiations, 2);
+    }
+
+    #[test]
+    fn template_instantiation_average_duration() {
+        let mut inst = TemplateInstantiation::new(30);
+        inst.add(50);
+        assert_eq!(inst.total_duration, 80);
+        assert_eq!(inst.num_instantiations, 2);
+        assert_eq!(inst.avg_duration(), 40);
+    }
+
+    #[test]
+    fn template_instantiation_average_is_zero_when_empty() {
+        let inst = TemplateInstantiation {
+            total_duration: 0,
+            num_instantiations: 0,
+        };
+        assert_eq!(inst.avg_duration(), 0);
+    }
+
+    #[test]
+    fn header_analysis_average_inclusion_time() {
+        let header = HeaderAnalysis {
+            parse_duration: 300,
+            num_inclusions: 3,
+            inclusion_paths: HashMap::new(),
+        };
+        assert_eq!(header.avg_inclusion_time(), 100);
     }
 
     #[test]

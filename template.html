@@ -133,6 +133,7 @@
                                 <th class="text-left p-2">#</th>
                                 <th class="text-left p-2">Header</th>
                                 <th class="text-left p-2">Duration</th>
+                                <th class="text-left p-2">Avg/Inclusion</th>
                                 <th class="text-left p-2">Inclusions</th>
                             </tr>
                         </thead>
@@ -151,6 +152,7 @@
                             <th class="text-left p-2">Kind</th>
                             <th class="text-left p-2">Template</th>
                             <th class="text-left p-2">Duration</th>
+                            <th class="text-left p-2">Avg/Instantiation</th>
                             <th class="text-left p-2">Instantiations</th>
                         </tr>
                     </thead>
@@ -368,11 +370,13 @@
                     .slice(0, 3)
                     .map(([chain, count]) => `<div class="text-xs text-gray-500">via ${esc(chain)} (${count}x)</div>`)
                     .join('');
+                const avg = h.num_inclusions > 0 ? Math.floor(h.parse_duration / h.num_inclusions) : 0;
                 return `
                 <tr class="border-b hover:bg-gray-100">
                     <td class="p-2">${i + 1}</td>
                     <td class="p-2 break-all">${esc(header)}${chains}</td>
                     <td class="p-2">${fmtDuration(h.parse_duration)}</td>
+                    <td class="p-2">${fmtDuration(avg)}</td>
                     <td class="p-2">${h.num_inclusions}</td>
                 </tr>`;
             }).join('');
@@ -380,14 +384,18 @@
 
         function renderTemplatesTable(sortedTemplates) {
             document.getElementById('table-body-templates').innerHTML = sortedTemplates.slice(0, 50)
-                .map(([name, t, kind], i) => `
+                .map(([name, t, kind], i) => {
+                    const avg = t.num_instantiations > 0 ? Math.floor(t.total_duration / t.num_instantiations) : 0;
+                    return `
                 <tr class="border-b hover:bg-gray-100">
                     <td class="p-2">${i + 1}</td>
                     <td class="p-2">${kind}</td>
                     <td class="p-2 break-all">${esc(name)}</td>
                     <td class="p-2">${fmtDuration(t.total_duration)}</td>
+                    <td class="p-2">${fmtDuration(avg)}</td>
                     <td class="p-2">${t.num_instantiations}</td>
-                </tr>`).join('');
+                </tr>`;
+                }).join('');
         }
 
         function renderKvTable(entries, emptyText) {
@@ -407,9 +415,9 @@
             const headerParses = Object.entries(u.header_parse_duration || {}).sort((a, b) => b[1] - a[1]).slice(0, 20)
                 .map(([h, d]) => [h, fmtDuration(d)]);
             const fnInsts = Object.entries(u.function_template_instantiations || {}).sort((a, b) => b[1].total_duration - a[1].total_duration).slice(0, 20)
-                .map(([name, t]) => [name, `${fmtDuration(t.total_duration)} (${t.num_instantiations}x)`]);
+                .map(([name, t]) => [name, `${fmtDuration(t.total_duration)} (${t.num_instantiations}x, avg ${fmtDuration(t.num_instantiations > 0 ? Math.floor(t.total_duration / t.num_instantiations) : 0)})`]);
             const classInsts = Object.entries(u.class_template_instantiations || {}).sort((a, b) => b[1].total_duration - a[1].total_duration).slice(0, 20)
-                .map(([name, t]) => [name, `${fmtDuration(t.total_duration)} (${t.num_instantiations}x)`]);
+                .map(([name, t]) => [name, `${fmtDuration(t.total_duration)} (${t.num_instantiations}x, avg ${fmtDuration(t.num_instantiations > 0 ? Math.floor(t.total_duration / t.num_instantiations) : 0)})`]);
 
             document.getElementById('detail-content').innerHTML = `
                 <h2 class="text-2xl font-bold mb-2 break-all">${esc(unitPath)}</h2>
