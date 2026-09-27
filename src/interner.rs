@@ -56,4 +56,9 @@ impl Interner {
     pub fn into_table(self) -> Vec<String> {
         self.table
     }
+
+    /// Takes the string table out of a `&mut` interner, leaving it empty.
+    pub fn take_table(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.table)
+    }
 }

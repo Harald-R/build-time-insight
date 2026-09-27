@@ -1,6 +1,6 @@
 use std::cmp::min;
 use std::collections::{BTreeMap, HashMap};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{LazyLock, Mutex, MutexGuard};
 
 use itertools::Itertools;
 use rayon::iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
@@ -251,8 +251,14 @@ fn is_source_file(path: &str) -> bool {
     .any(|ext| lower.ends_with(ext))
 }
 
+fn lock(interner: &Mutex<Interner>) -> MutexGuard<'_, Interner> {
+    interner
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 fn intern(interner: &Mutex<Interner>, s: &str) -> StringId {
-    interner.lock().unwrap().intern(s)
+    lock(interner).intern(s)
 }
 
 pub fn analyze_unit(trace: &FileTrace, interner: &Mutex<Interner>) -> (StringId, UnitAnalysis) {
@@ -459,15 +465,15 @@ impl Analysis {
 }
 
 pub fn analyze(traces: Vec<FileTrace>) -> Analysis {
-    let interner = Arc::new(Mutex::new(Interner::default()));
-    let shared = interner.clone();
+    let interner = Mutex::new(Interner::default());
+    let shared = &interner;
     let unit_analysis: HashMap<StringId, UnitAnalysis> = POOL.install(move || {
         traces
             .par_iter()
-            .map(|trace| analyze_unit(trace, &shared))
+            .map(|trace| analyze_unit(trace, shared))
             .collect()
     });
-    finalize(interner, AnalysisResult::from(unit_analysis))
+    finalize(&interner, AnalysisResult::from(unit_analysis))
 }
 
 /// Analyze the build directory using up to `jobs` worker threads.
@@ -477,8 +483,8 @@ pub fn analyze(traces: Vec<FileTrace>) -> Analysis {
 /// with the number of worker threads.
 pub fn analyze_build_dir(build_dir: &str, jobs: usize, excludes: &[String]) -> Analysis {
     let paths = crate::build_traces::glob_trace_paths(build_dir, excludes);
-    let interner = Arc::new(Mutex::new(Interner::default()));
-    let shared = interner.clone();
+    let interner = Mutex::new(Interner::default());
+    let shared = &interner;
     let unit_analysis: HashMap<StringId, UnitAnalysis> = build_pool(jobs).install(move || {
         paths
             .into_par_iter()
@@ -491,22 +497,17 @@ pub fn analyze_build_dir(build_dir: &str, jobs: usize, excludes: &[String]) -> A
                     source_file: Some(source_file),
                     trace_tree,
                 };
-                Some(analyze_unit(&file_trace, &shared))
+                Some(analyze_unit(&file_trace, shared))
             })
             .collect()
     });
-    finalize(interner, AnalysisResult::from(unit_analysis))
+    finalize(&interner, AnalysisResult::from(unit_analysis))
 }
 
 /// Sort the string table and remap every id so that identical inputs produce
 /// identical output bytes regardless of the order strings were first interned.
-fn finalize(interner: Arc<Mutex<Interner>>, result: AnalysisResult) -> Analysis {
-    let strings = Arc::try_unwrap(interner)
-        .ok()
-        .unwrap()
-        .into_inner()
-        .unwrap()
-        .into_table();
+fn finalize(interner: &Mutex<Interner>, result: AnalysisResult) -> Analysis {
+    let strings = lock(interner).take_table();
     let mut sorted = strings.clone();
     sorted.sort();
     let new_id: HashMap<&str, StringId> = sorted
