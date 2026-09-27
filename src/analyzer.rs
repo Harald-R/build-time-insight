@@ -1,5 +1,6 @@
 use std::cmp::min;
 use std::collections::{BTreeMap, HashMap};
+use std::path::Path;
 use std::sync::{LazyLock, Mutex, MutexGuard};
 
 use itertools::Itertools;
@@ -261,9 +262,37 @@ fn intern(interner: &Mutex<Interner>, s: &str) -> StringId {
     lock(interner).intern(s)
 }
 
+fn intern_path(interner: &Mutex<Interner>, path: &str) -> StringId {
+    lock(interner).intern_path(path)
+}
+
+/// Best-effort root of the project containing `build_dir`: the git top-level,
+/// falling back to the nearest ancestor directory containing `.git`.
+fn project_root(build_dir: &str) -> Option<String> {
+    if let Ok(output) = std::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(build_dir)
+        .output()
+        && output.status.success()
+        && let Ok(s) = String::from_utf8(output.stdout)
+    {
+        let root = s.trim();
+        if Path::new(root).is_dir() {
+            return Some(root.to_string());
+        }
+    }
+    let mut dir = Path::new(build_dir);
+    loop {
+        if dir.join(".git").exists() {
+            return Some(dir.to_string_lossy().into_owned());
+        }
+        dir = dir.parent()?;
+    }
+}
+
 pub fn analyze_unit(trace: &FileTrace, interner: &Mutex<Interner>) -> (StringId, UnitAnalysis) {
     let source_file = trace.source_file.as_deref().unwrap_or(&trace.trace_file);
-    let source_file_id = intern(interner, source_file);
+    let source_file_id = intern_path(interner, source_file);
     let mut analysis = UnitAnalysis {
         total_duration: 0,
         frontend_duration: 0,
@@ -290,7 +319,7 @@ pub fn analyze_unit(trace: &FileTrace, interner: &Mutex<Interner>) -> (StringId,
                 .filter(|file| !is_source_file(file))
                 .map(|file| (file, node.trace.dur.unwrap_or(0)));
             if let Some((header, duration)) = header_and_dur {
-                let header_id = intern(interner, header);
+                let header_id = intern_path(interner, header);
                 analysis
                     .header_parse_duration
                     .entry(header_id)
@@ -384,7 +413,7 @@ pub fn analyze_unit(trace: &FileTrace, interner: &Mutex<Interner>) -> (StringId,
             {
                 let header = header.split(':').next().unwrap_or(header);
                 if !is_source_file(header) {
-                    let header_id = intern(interner, header);
+                    let header_id = intern_path(interner, header);
                     analysis
                         .header_parse_duration
                         .entry(header_id)
@@ -421,9 +450,9 @@ pub fn analyze_unit(trace: &FileTrace, interner: &Mutex<Interner>) -> (StringId,
                     // Prefix chain: everything between the top-level source file
                     // and this header, so the header's own name is not repeated.
                     let prefix = chain[1..chain.len() - 1].to_vec();
-                    let header_id = intern(interner, &file);
+                    let header_id = intern_path(interner, &file);
                     let chain_ids: Vec<StringId> =
-                        prefix.iter().map(|s| intern(interner, s)).collect();
+                        prefix.iter().map(|s| intern_path(interner, s)).collect();
                     analysis
                         .header_inclusion_paths
                         .entry(header_id)
@@ -483,7 +512,7 @@ pub fn analyze(traces: Vec<FileTrace>) -> Analysis {
 /// with the number of worker threads.
 pub fn analyze_build_dir(build_dir: &str, jobs: usize, excludes: &[String]) -> Analysis {
     let paths = crate::build_traces::glob_trace_paths(build_dir, excludes);
-    let interner = Mutex::new(Interner::default());
+    let interner = Mutex::new(Interner::with_root(project_root(build_dir)));
     let shared = &interner;
     let unit_analysis: HashMap<StringId, UnitAnalysis> = build_pool(jobs).install(move || {
         paths
@@ -1144,6 +1173,43 @@ mod tests {
         let unit_id = result.id_of("build/main.cpp.json").unwrap();
         let unit = &result.result.unit_analysis[&unit_id];
         assert_eq!(unit.total_duration, 100);
+    }
+
+    #[test]
+    fn project_root_finds_git_directory() {
+        let root = std::env::temp_dir().join(format!("proj_root_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+
+        let found = project_root(root.join("build").to_str().unwrap()).unwrap();
+        assert_eq!(found, root.to_string_lossy());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn analyze_build_dir_relativizes_paths_against_root() {
+        let root = test_build_dir("relativize_root");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::create_dir_all(root.join("build")).unwrap();
+        let main = root.join("src/main.cpp");
+        std::fs::create_dir_all(main.parent().unwrap()).unwrap();
+        let json = format!(
+            r#"{{
+                "traceEvents": [
+                    {{ "pid": 1, "tid": 1, "ts": 0, "ph": "X", "dur": 100, "name": "OptModule", "args": {{ "detail": "{}" }} }},
+                    {{ "pid": 1, "tid": 1, "ts": 100, "ph": "X", "dur": 1000, "name": "Total ExecuteCompiler" }}
+                ],
+                "beginningOfTime": 0
+            }}"#,
+            main.display()
+        );
+        std::fs::write(root.join("build/main.cpp.json"), json).unwrap();
+
+        let analysis = analyze_build_dir(root.join("build").to_str().unwrap(), 2, &[]);
+        std::fs::remove_dir_all(&root).ok();
+
+        assert!(analysis.id_of("src/main.cpp").is_some());
+        assert!(analysis.id_of(main.to_str().unwrap()).is_none());
     }
 
     #[test]
