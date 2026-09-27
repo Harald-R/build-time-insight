@@ -1,10 +1,11 @@
 use std::{
     collections::HashMap,
     fs::File,
-    io::{BufReader, BufWriter, Write},
+    io::{BufReader, BufWriter},
     path::Path,
 };
 
+use flate2::{Compression, read::GzDecoder, write::GzEncoder};
 use serde::{Deserialize, Serialize, Serializer, ser::SerializeMap};
 use thiserror::Error;
 
@@ -93,17 +94,19 @@ impl Report {
 
 pub fn write_report(report: &Report, path: &Path) -> Result<(), ReportError> {
     let file = File::create(path)?;
-    let mut writer = BufWriter::new(file);
-    let mut serializer = rmp_serde::Serializer::new(&mut writer).with_struct_map();
+    let writer = BufWriter::new(file);
+    let mut gz = GzEncoder::new(writer, Compression::default());
+    let mut serializer = rmp_serde::Serializer::new(&mut gz).with_struct_map();
     report.serialize(&mut serializer)?;
-    writer.flush()?;
+    gz.finish()?;
     Ok(())
 }
 
 pub fn read_report(path: &Path) -> Result<Report, ReportError> {
     let file = File::open(path)?;
     let reader = BufReader::new(file);
-    let report: Report = rmp_serde::from_read(reader)?;
+    let gz = GzDecoder::new(reader);
+    let report: Report = rmp_serde::from_read(gz)?;
     Ok(report)
 }
 
@@ -196,6 +199,34 @@ mod tests {
     fn serialization_is_byte_stable() {
         let report = sample_report();
         assert_eq!(encode(&report), encode(&report));
+    }
+
+    #[test]
+    fn written_report_is_gzip_compressed_and_smaller() {
+        let report = sample_report();
+        let path = std::env::temp_dir().join("gzip_check.msgpack");
+        write_report(&report, &path).unwrap();
+        let file_bytes = std::fs::read(&path).unwrap();
+        std::fs::remove_file(path).ok();
+
+        // gzip magic bytes (0x1f 0x8b)
+        assert_eq!(&file_bytes[..2], &[0x1f, 0x8b]);
+        // Compression must shrink the payload
+        assert!(file_bytes.len() < encode(&report).len());
+    }
+
+    #[test]
+    fn gzip_output_is_deterministic() {
+        let report = sample_report();
+        let path = std::env::temp_dir().join("gzip_det1.msgpack");
+        let path2 = std::env::temp_dir().join("gzip_det2.msgpack");
+        write_report(&report, &path).unwrap();
+        write_report(&report, &path2).unwrap();
+        let a = std::fs::read(&path).unwrap();
+        let b = std::fs::read(&path2).unwrap();
+        std::fs::remove_file(path).ok();
+        std::fs::remove_file(path2).ok();
+        assert_eq!(a, b);
     }
 
     #[test]

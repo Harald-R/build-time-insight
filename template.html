@@ -274,9 +274,13 @@
             const file = e.target.files[0];
             if (!file) return;
             const reader = new FileReader();
-            reader.onload = () => {
+            reader.onload = async () => {
                 try {
-                    reportData = decodeMsgpack(reader.result);
+                    // Reports are gzip-compressed msgpack.
+                    const decompressed = await new Response(
+                        new Blob([reader.result]).stream().pipeThrough(new DecompressionStream('gzip'))
+                    ).arrayBuffer();
+                    reportData = decodeMsgpack(decompressed);
                     render(reportData);
                     setText('report-file-name', file.name);
                 } catch (err) {
