@@ -8,6 +8,7 @@ use std::{
 use serde::{Deserialize, Serialize, Serializer, ser::SerializeMap};
 use thiserror::Error;
 
+use crate::interner::StringId;
 use crate::{analyzer::AnalysisResult, build_info::BuildInfo};
 
 #[derive(Debug, Error)]
@@ -61,16 +62,32 @@ where
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Report {
+    /// String table backing the `u32` keys in `analysis`.
+    pub strings: Vec<String>,
     pub build_info: BuildInfo,
     pub analysis: AnalysisResult,
 }
 
 impl Report {
-    pub fn new(build_info: BuildInfo, analysis: AnalysisResult) -> Self {
+    pub fn new(strings: Vec<String>, build_info: BuildInfo, analysis: AnalysisResult) -> Self {
         Self {
+            strings,
             build_info,
             analysis,
         }
+    }
+
+    /// Resolve an interned string id to its label.
+    pub fn resolve(&self, id: StringId) -> &str {
+        id.resolve(&self.strings)
+    }
+
+    /// Look up the id for an interned string.
+    pub fn id_of(&self, s: &str) -> Option<StringId> {
+        self.strings
+            .binary_search_by(|x| x.as_str().cmp(s))
+            .ok()
+            .map(|i| StringId::from(i as u32))
     }
 }
 
@@ -98,12 +115,15 @@ pub fn unit_duration_diffs(base: &Report, target: &Report) -> Vec<(String, i64)>
         .unit_analysis
         .iter()
         .map(|(unit, analysis)| {
+            let unit_name = target.resolve(*unit);
             let base_duration = base
-                .analysis
-                .unit_analysis
-                .get(unit)
+                .id_of(unit_name)
+                .and_then(|id| base.analysis.unit_analysis.get(&id))
                 .map_or(0, |a| a.total_duration);
-            (unit.clone(), analysis.total_duration - base_duration)
+            (
+                unit_name.to_string(),
+                analysis.total_duration - base_duration,
+            )
         })
         .collect();
     diffs.sort_by_key(|(_, diff)| std::cmp::Reverse(*diff));
@@ -117,34 +137,52 @@ mod tests {
     use std::collections::{BTreeMap, HashMap};
 
     fn sample_report() -> Report {
+        // Production reports carry a sorted string table where ids are positions;
+        // mirror that here so `Report::id_of`'s binary search works.
+        let strings = vec![
+            "a.cpp".to_string(),
+            "a.h".to_string(),
+            "b.cpp".to_string(),
+            "m.h".to_string(),
+            "z.h".to_string(),
+        ];
+        let id_of = |s: &str| {
+            StringId::from(strings.binary_search_by(|x| x.as_str().cmp(s)).unwrap() as u32)
+        };
+        let a_cpp = id_of("a.cpp");
+        let b_cpp = id_of("b.cpp");
+        let z_h = id_of("z.h");
+        let a_h = id_of("a.h");
+        let m_h = id_of("m.h");
+
         let mut unit = UnitAnalysis {
             total_duration: 100,
             frontend_duration: 80,
             backend_duration: 20,
             template_instantiation_duration: 30,
-            header_parse_duration: HashMap::from([("z.h".into(), 5), ("a.h".into(), 9)]),
+            header_parse_duration: HashMap::from([(z_h, 5), (a_h, 9)]),
             header_inclusion_paths: BTreeMap::new(),
             function_template_instantiations: HashMap::new(),
             class_template_instantiations: HashMap::new(),
         };
         unit.header_inclusion_paths
-            .insert("a.h".into(), BTreeMap::from([(vec!["z.h".to_string()], 3)]));
+            .insert(a_h, BTreeMap::from([(vec![z_h], 3)]));
         let mut units = HashMap::new();
-        units.insert("b.cpp".into(), unit);
+        units.insert(b_cpp, unit);
         units.insert(
-            "a.cpp".into(),
+            a_cpp,
             UnitAnalysis {
                 total_duration: 50,
                 frontend_duration: 40,
                 backend_duration: 10,
                 template_instantiation_duration: 5,
-                header_parse_duration: HashMap::from([("m.h".into(), 7)]),
+                header_parse_duration: HashMap::from([(m_h, 7)]),
                 header_inclusion_paths: BTreeMap::new(),
                 function_template_instantiations: HashMap::new(),
                 class_template_instantiations: HashMap::new(),
             },
         );
-        Report::new(BuildInfo::default(), AnalysisResult::from(units))
+        Report::new(strings, BuildInfo::default(), AnalysisResult::from(units))
     }
 
     fn encode(report: &Report) -> Vec<u8> {
@@ -167,18 +205,26 @@ mod tests {
         write_report(&report, &path).unwrap();
         let read = read_report(&path).unwrap();
         assert_eq!(read.analysis.unit_analysis.len(), 2);
+        let a_cpp = read.id_of("a.cpp").unwrap();
+        let m_h = read.id_of("m.h").unwrap();
         assert_eq!(
-            read.analysis.unit_analysis["a.cpp"].header_parse_duration["m.h"],
+            read.analysis.unit_analysis[&a_cpp].header_parse_duration[&m_h],
             7
         );
         std::fs::remove_file(path).ok();
     }
 
     fn report_with_unit_durations(durations: &[(&str, i64)]) -> Report {
+        let mut strings: Vec<String> = durations.iter().map(|(n, _)| (*n).to_string()).collect();
+        strings.sort();
+        strings.dedup();
+        let id_of = |s: &str| {
+            StringId::from(strings.binary_search_by(|x| x.as_str().cmp(s)).unwrap() as u32)
+        };
         let mut units = HashMap::new();
         for (name, duration) in durations {
             units.insert(
-                (*name).into(),
+                id_of(name),
                 UnitAnalysis {
                     total_duration: *duration,
                     frontend_duration: 0,
@@ -191,7 +237,7 @@ mod tests {
                 },
             );
         }
-        Report::new(BuildInfo::default(), AnalysisResult::from(units))
+        Report::new(strings, BuildInfo::default(), AnalysisResult::from(units))
     }
 
     #[test]

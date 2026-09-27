@@ -265,6 +265,10 @@
 
         let reportData = null;
         let chart = null;
+        let strings = [];
+
+        // Resolve an interned string id to its label.
+        function s(id) { return strings[id]; }
 
         document.getElementById('report-file').addEventListener('change', (e) => {
             const file = e.target.files[0];
@@ -286,6 +290,7 @@
             document.getElementById('empty-state').classList.add('hidden');
             document.getElementById('report-content').classList.remove('hidden');
 
+            strings = report.strings || [];
             const units = report.analysis.unit_analysis || {};
             const headers = report.analysis.header_analysis || {};
             const fnTemplates = report.analysis.function_template_instantiations || {};
@@ -335,7 +340,7 @@
             chart = new Chart(ctx, {
                 type: 'bar',
                 data: {
-                    labels: units.map(([path]) => path.split('/').pop()),
+                    labels: units.map(([id]) => s(id).split('/').pop()),
                     datasets: [{
                         label: 'Duration (s)',
                         data: units.map(([, u]) => (u.total_duration || 0) / 1e6),
@@ -366,16 +371,17 @@
         }
 
         function renderUnitsTable(sortedUnits) {
-            document.getElementById('table-body-longest-units').innerHTML = sortedUnits.map(([path, u], i) => `
-                <tr class="border-b hover:bg-gray-100 cursor-pointer" onclick="showUnitDetail(this.dataset.unit)" data-unit="${esc(path)}">
+            document.getElementById('table-body-longest-units').innerHTML = sortedUnits.map(([id, u], i) => `
+                <tr class="border-b hover:bg-gray-100 cursor-pointer" onclick="showUnitDetail(this.dataset.unit)" data-unit="${esc(id)}">
                     <td class="p-2">${i + 1}</td>
-                    <td class="p-2 break-all">${esc(path)}</td>
+                    <td class="p-2 break-all">${esc(s(id))}</td>
                     <td class="p-2">${fmtDuration(u.total_duration)}</td>
                 </tr>`).join('');
         }
 
         function renderHeadersTable(sortedHeaders) {
-            document.getElementById('table-body-longest-headers').innerHTML = sortedHeaders.map(([header, h], i) => {
+            document.getElementById('table-body-longest-headers').innerHTML = sortedHeaders.map(([id, h], i) => {
+                const header = s(id);
                 const paths = h.inclusion_paths instanceof Map
                     ? Array.from(h.inclusion_paths.entries())
                     : Object.entries(h.inclusion_paths || {});
@@ -383,7 +389,8 @@
                     .sort((a, b) => b[1] - a[1])
                     .slice(0, 3)
                     .map(([prefix, count]) => {
-                        const full = prefix.length ? [...prefix, header].join(' -> ') : header;
+                        const prefixLabels = prefix.map(x => s(x));
+                        const full = prefixLabels.length ? [...prefixLabels, header].join(' -> ') : header;
                         return `<div class="text-xs text-gray-500">via ${esc(full)} (${count}x)</div>`;
                     })
                     .join('');
@@ -401,13 +408,13 @@
 
         function renderTemplatesTable(sortedTemplates) {
             document.getElementById('table-body-templates').innerHTML = sortedTemplates.slice(0, 50)
-                .map(([name, t, kind], i) => {
+                .map(([id, t, kind], i) => {
                     const avg = t.num_instantiations > 0 ? Math.floor(t.total_duration / t.num_instantiations) : 0;
                     return `
                 <tr class="border-b hover:bg-gray-100">
                     <td class="p-2">${i + 1}</td>
                     <td class="p-2">${kind}</td>
-                    <td class="p-2 break-all">${esc(name)}</td>
+                    <td class="p-2 break-all">${esc(s(id))}</td>
                     <td class="p-2">${fmtDuration(t.total_duration)}</td>
                     <td class="p-2">${fmtDuration(avg)}</td>
                     <td class="p-2">${t.num_instantiations}</td>
@@ -423,21 +430,21 @@
                 `</tbody></table>`;
         }
 
-        function showUnitDetail(unitPath) {
-            const u = reportData && reportData.analysis.unit_analysis[unitPath];
+        function showUnitDetail(unitId) {
+            const u = reportData && reportData.analysis.unit_analysis[unitId];
             if (!u) return;
             document.getElementById('main-page').classList.add('hidden');
             document.getElementById('detail-page').classList.remove('hidden');
 
             const headerParses = Object.entries(u.header_parse_duration || {}).sort((a, b) => b[1] - a[1]).slice(0, 20)
-                .map(([h, d]) => [h, fmtDuration(d)]);
+                .map(([h, d]) => [s(h), fmtDuration(d)]);
             const fnInsts = Object.entries(u.function_template_instantiations || {}).sort((a, b) => b[1].total_duration - a[1].total_duration).slice(0, 20)
-                .map(([name, t]) => [name, `${fmtDuration(t.total_duration)} (${t.num_instantiations}x, avg ${fmtDuration(t.num_instantiations > 0 ? Math.floor(t.total_duration / t.num_instantiations) : 0)})`]);
+                .map(([n, t]) => [s(n), `${fmtDuration(t.total_duration)} (${t.num_instantiations}x, avg ${fmtDuration(t.num_instantiations > 0 ? Math.floor(t.total_duration / t.num_instantiations) : 0)})`]);
             const classInsts = Object.entries(u.class_template_instantiations || {}).sort((a, b) => b[1].total_duration - a[1].total_duration).slice(0, 20)
-                .map(([name, t]) => [name, `${fmtDuration(t.total_duration)} (${t.num_instantiations}x, avg ${fmtDuration(t.num_instantiations > 0 ? Math.floor(t.total_duration / t.num_instantiations) : 0)})`]);
+                .map(([n, t]) => [s(n), `${fmtDuration(t.total_duration)} (${t.num_instantiations}x, avg ${fmtDuration(t.num_instantiations > 0 ? Math.floor(t.total_duration / t.num_instantiations) : 0)})`]);
 
             document.getElementById('detail-content').innerHTML = `
-                <h2 class="text-2xl font-bold mb-2 break-all">${esc(unitPath)}</h2>
+                <h2 class="text-2xl font-bold mb-2 break-all">${esc(s(unitId))}</h2>
                 <div class="grid grid-cols-2 md:grid-cols-4 gap-2 mb-4 text-sm">
                     <div class="p-2 bg-gray-50 rounded"><div class="text-gray-500">Total</div><div class="font-medium">${fmtDuration(u.total_duration)}</div></div>
                     <div class="p-2 bg-gray-50 rounded"><div class="text-gray-500">Frontend</div><div class="font-medium">${fmtDuration(u.frontend_duration)}</div></div>
