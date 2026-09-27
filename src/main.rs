@@ -51,10 +51,15 @@ fn run_analyze(args: &cli::AnalyzeArgs) -> anyhow::Result<()> {
             analysis.num_inclusions,
             analysis.avg_inclusion_time()
         );
-        let mut chains: Vec<(&String, &i64)> = analysis.inclusion_paths.iter().collect();
+        let mut chains: Vec<(&Vec<String>, &i64)> = analysis.inclusion_paths.iter().collect();
         chains.sort_by(|a, b| b.1.cmp(a.1));
         for (chain, count) in chains.into_iter().take(5) {
-            println!("   via {} ({} times)", chain, count);
+            let full_chain = if chain.is_empty() {
+                name.clone()
+            } else {
+                format!("{} -> {}", chain.join(" -> "), name)
+            };
+            println!("   via {full_chain} ({} times)", count);
         }
     }
 
@@ -65,7 +70,10 @@ fn run_analyze(args: &cli::AnalyzeArgs) -> anyhow::Result<()> {
             .map(|(name, inst)| {
                 format!(
                     "{} ({} us, {} instantiations, avg {} us)",
-                    name, inst.total_duration, inst.num_instantiations, inst.avg_duration()
+                    name,
+                    inst.total_duration,
+                    inst.num_instantiations,
+                    inst.avg_duration()
                 )
             })
             .unwrap_or_else(|| "none".to_string());
@@ -74,7 +82,10 @@ fn run_analyze(args: &cli::AnalyzeArgs) -> anyhow::Result<()> {
             .map(|(name, inst)| {
                 format!(
                     "{} ({} us, {} instantiations, avg {} us)",
-                    name, inst.total_duration, inst.num_instantiations, inst.avg_duration()
+                    name,
+                    inst.total_duration,
+                    inst.num_instantiations,
+                    inst.avg_duration()
                 )
             })
             .unwrap_or_else(|| "none".to_string());

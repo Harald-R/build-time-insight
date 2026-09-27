@@ -1,5 +1,5 @@
 use std::cmp::min;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::LazyLock;
 
 use itertools::Itertools;
@@ -28,8 +28,9 @@ pub struct UnitAnalysis {
     pub template_instantiation_duration: i64,
     #[serde(serialize_with = "crate::report::serialize_sorted_map")]
     pub header_parse_duration: HashMap<String, i64>,
-    #[serde(serialize_with = "crate::report::serialize_sorted_nested_map")]
-    pub header_inclusion_paths: HashMap<String, HashMap<String, i64>>,
+    // The chain is stored as the prefix of includers only (the header itself is
+    // the map key); the header's own name is not repeated in its chain.
+    pub header_inclusion_paths: BTreeMap<String, BTreeMap<Vec<String>, i64>>,
     #[serde(serialize_with = "crate::report::serialize_sorted_map")]
     pub function_template_instantiations: HashMap<String, TemplateInstantiation>,
     #[serde(serialize_with = "crate::report::serialize_sorted_map")]
@@ -92,8 +93,7 @@ impl UnitAnalysis {
 pub struct HeaderAnalysis {
     pub parse_duration: i64,
     pub num_inclusions: i64,
-    #[serde(serialize_with = "crate::report::serialize_sorted_map")]
-    pub inclusion_paths: HashMap<String, i64>,
+    pub inclusion_paths: BTreeMap<Vec<String>, i64>,
 }
 
 impl HeaderAnalysis {
@@ -187,21 +187,23 @@ impl AnalysisResult {
         per_unit_analysis: &HashMap<String, UnitAnalysis>,
     ) -> HashMap<String, HeaderAnalysis> {
         let mut header_analysis: HashMap<String, HeaderAnalysis> = HashMap::new();
-        for analysis in per_unit_analysis.iter() {
-            for (header, duration) in analysis.1.header_parse_duration.iter() {
+        for analysis in per_unit_analysis.values() {
+            for (header, duration) in &analysis.header_parse_duration {
                 header_analysis
-                    .entry(header.to_string())
+                    .entry(header.clone())
                     .and_modify(|val| {
-                        val.parse_duration += duration;
+                        val.parse_duration += *duration;
                         val.num_inclusions += 1
                     })
                     .or_insert(HeaderAnalysis {
                         parse_duration: *duration,
                         num_inclusions: 1,
-                        inclusion_paths: HashMap::new(),
+                        inclusion_paths: BTreeMap::new(),
                     });
             }
-            for (header, chain_counts) in analysis.1.header_inclusion_paths.iter() {
+        }
+        for analysis in per_unit_analysis.values() {
+            for (header, chain_counts) in &analysis.header_inclusion_paths {
                 if let Some(header_analysis) = header_analysis.get_mut(header) {
                     for (chain, count) in chain_counts {
                         *header_analysis
@@ -260,7 +262,7 @@ pub fn analyze_unit(trace: &FileTrace) -> (String, UnitAnalysis) {
         backend_duration: 0,
         template_instantiation_duration: 0,
         header_parse_duration: HashMap::new(),
-        header_inclusion_paths: HashMap::new(),
+        header_inclusion_paths: BTreeMap::new(),
         function_template_instantiations: HashMap::new(),
         class_template_instantiations: HashMap::new(),
     };
@@ -405,12 +407,14 @@ pub fn analyze_unit(trace: &FileTrace) -> (String, UnitAnalysis) {
             if let Some(file) = file {
                 chain.push(file.clone());
                 if !is_source_file(&file) && chain.len() > 1 {
-                    let header_chain = chain[1..].join(" -> ");
+                    // Prefix chain: everything between the top-level source file
+                    // and this header, so the header's own name is not repeated.
+                    let prefix = chain[1..chain.len() - 1].to_vec();
                     analysis
                         .header_inclusion_paths
                         .entry(file)
                         .or_default()
-                        .entry(header_chain)
+                        .entry(prefix)
                         .and_modify(|count| *count += 1)
                         .or_insert(1);
                 }
@@ -562,7 +566,7 @@ mod tests {
             backend_duration: 0,
             template_instantiation_duration: 0,
             header_parse_duration: HashMap::new(),
-            header_inclusion_paths: HashMap::new(),
+            header_inclusion_paths: BTreeMap::new(),
             function_template_instantiations: HashMap::new(),
             class_template_instantiations: HashMap::new(),
         }
@@ -572,7 +576,7 @@ mod tests {
         HeaderAnalysis {
             parse_duration,
             num_inclusions: 1,
-            inclusion_paths: HashMap::new(),
+            inclusion_paths: BTreeMap::new(),
         }
     }
 
@@ -645,7 +649,7 @@ mod tests {
         let header = HeaderAnalysis {
             parse_duration: 300,
             num_inclusions: 3,
-            inclusion_paths: HashMap::new(),
+            inclusion_paths: BTreeMap::new(),
         };
         assert_eq!(header.avg_inclusion_time(), 100);
     }
@@ -719,11 +723,11 @@ mod tests {
         let mut a = unit_analysis(0);
         a.header_parse_duration = HashMap::from([("a.h".into(), 100), ("b.h".into(), 50)]);
         a.header_inclusion_paths
-            .insert("a.h".into(), HashMap::from([("a.h -> b.h".into(), 1)]));
+            .insert("b.h".into(), BTreeMap::from([(vec!["a.h".to_string()], 1)]));
         let mut b = unit_analysis(0);
         b.header_parse_duration = HashMap::from([("a.h".into(), 200), ("c.h".into(), 30)]);
         b.header_inclusion_paths
-            .insert("a.h".into(), HashMap::from([("a.h -> b.h".into(), 2)]));
+            .insert("b.h".into(), BTreeMap::from([(vec!["a.h".to_string()], 2)]));
 
         let result =
             AnalysisResult::from(HashMap::from([("a.cpp".into(), a), ("b.cpp".into(), b)]));
@@ -731,11 +735,11 @@ mod tests {
         let a_h = &result.header_analysis["a.h"];
         assert_eq!(a_h.parse_duration, 300);
         assert_eq!(a_h.num_inclusions, 2);
-        assert_eq!(a_h.inclusion_paths["a.h -> b.h"], 3);
 
         let b_h = &result.header_analysis["b.h"];
         assert_eq!(b_h.parse_duration, 50);
         assert_eq!(b_h.num_inclusions, 1);
+        assert_eq!(b_h.inclusion_paths[&vec!["a.h".to_string()]], 3);
 
         let c_h = &result.header_analysis["c.h"];
         assert_eq!(c_h.parse_duration, 30);
@@ -943,9 +947,14 @@ mod tests {
             ],
         );
         let unit = analyze_unit(trace, "src/main.cpp");
-        assert_eq!(unit.header_inclusion_paths["lib/a.h"]["lib/a.h"], 1);
+        // a.h is included directly from the source file, so its chain is empty
         assert_eq!(
-            unit.header_inclusion_paths["lib/b.h"]["lib/a.h -> lib/b.h"],
+            unit.header_inclusion_paths["lib/a.h"][&Vec::<String>::new()],
+            1
+        );
+        // b.h is included via a.h, so its chain stores the prefix [a.h]
+        assert_eq!(
+            unit.header_inclusion_paths["lib/b.h"][&vec!["lib/a.h".to_string()]],
             1
         );
     }

@@ -59,25 +59,6 @@ where
     SortedRef(map).serialize(serializer)
 }
 
-/// `serialize_with` target for the two-level `header_inclusion_paths`
-/// map (`header -> inclusion chain -> count`); both levels are sorted.
-pub(crate) fn serialize_sorted_nested_map<S>(
-    map: &HashMap<String, HashMap<String, i64>>,
-    serializer: S,
-) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    let mut outer: Vec<(&String, &HashMap<String, i64>)> = map.iter().collect();
-    outer.sort_unstable_by(|a, b| a.0.cmp(b.0));
-
-    let mut map_ser = serializer.serialize_map(Some(outer.len()))?;
-    for (k, v) in outer {
-        map_ser.serialize_entry(k, &SortedRef(v))?;
-    }
-    map_ser.end()
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Report {
     pub build_info: BuildInfo,
@@ -133,7 +114,7 @@ pub fn unit_duration_diffs(base: &Report, target: &Report) -> Vec<(String, i64)>
 mod tests {
     use super::*;
     use crate::analyzer::{AnalysisResult, UnitAnalysis};
-    use std::collections::HashMap;
+    use std::collections::{BTreeMap, HashMap};
 
     fn sample_report() -> Report {
         let mut unit = UnitAnalysis {
@@ -142,12 +123,12 @@ mod tests {
             backend_duration: 20,
             template_instantiation_duration: 30,
             header_parse_duration: HashMap::from([("z.h".into(), 5), ("a.h".into(), 9)]),
-            header_inclusion_paths: HashMap::new(),
+            header_inclusion_paths: BTreeMap::new(),
             function_template_instantiations: HashMap::new(),
             class_template_instantiations: HashMap::new(),
         };
         unit.header_inclusion_paths
-            .insert("a.h".into(), HashMap::from([("a.h -> z.h".into(), 3)]));
+            .insert("a.h".into(), BTreeMap::from([(vec!["z.h".to_string()], 3)]));
         let mut units = HashMap::new();
         units.insert("b.cpp".into(), unit);
         units.insert(
@@ -158,7 +139,7 @@ mod tests {
                 backend_duration: 10,
                 template_instantiation_duration: 5,
                 header_parse_duration: HashMap::from([("m.h".into(), 7)]),
-                header_inclusion_paths: HashMap::new(),
+                header_inclusion_paths: BTreeMap::new(),
                 function_template_instantiations: HashMap::new(),
                 class_template_instantiations: HashMap::new(),
             },
@@ -204,7 +185,7 @@ mod tests {
                     backend_duration: 0,
                     template_instantiation_duration: 0,
                     header_parse_duration: HashMap::new(),
-                    header_inclusion_paths: HashMap::new(),
+                    header_inclusion_paths: BTreeMap::new(),
                     function_template_instantiations: HashMap::new(),
                     class_template_instantiations: HashMap::new(),
                 },
