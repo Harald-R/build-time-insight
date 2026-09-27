@@ -1,3 +1,4 @@
+use build_time_insight::analyzer::HeaderAnalysis;
 use build_time_insight::interner::StringId;
 use build_time_insight::report::{self, Report};
 
@@ -26,7 +27,7 @@ fn run_analyze(args: &cli::AnalyzeArgs) -> anyhow::Result<()> {
     let build_info = build_info::extract_build_info(&build_dir);
     log::info!("Build info: {:#?}", build_info);
 
-    let analysis = analyzer::analyze_build_dir(&build_dir, jobs, &args.exclude);
+    let analysis = analyzer::analyze_build_dir(&build_dir, jobs, &args.exclude, args.header_usage);
 
     println!("Longest files to compile:");
     for item in analysis.result.longest_unit_compilations(limit).enumerate() {
@@ -120,6 +121,45 @@ fn run_analyze(args: &cli::AnalyzeArgs) -> anyhow::Result<()> {
             inst.num_instantiations,
             inst.avg_duration()
         );
+    }
+
+    if args.header_usage {
+        println!("Header usage:");
+        let mut headers: Vec<(&StringId, &HeaderAnalysis)> = analysis
+            .result
+            .header_analysis
+            .iter()
+            .filter(|(_, ha)| {
+                ha.unused_units + ha.forward_declarable_units + ha.definition_required_units > 0
+            })
+            .collect();
+        headers.sort_by_key(|(_, ha)| {
+            std::cmp::Reverse(ha.definition_required_units + ha.forward_declarable_units)
+        });
+        if headers.is_empty() {
+            println!("  (none found; clang could not analyze the translation units)");
+        }
+        for (header_id, ha) in headers {
+            let header = analysis.resolve(*header_id);
+            if ha.unused_units > 0 {
+                println!(
+                    "  {}: unused in {} unit(s) -> remove #include",
+                    header, ha.unused_units
+                );
+            }
+            if ha.forward_declarable_units > 0 {
+                println!(
+                    "  {}: replace #include with forward declaration in {} unit(s)",
+                    header, ha.forward_declarable_units
+                );
+            }
+            if ha.definition_required_units > 0 {
+                println!(
+                    "  {}: needs definition in {} unit(s)",
+                    header, ha.definition_required_units
+                );
+            }
+        }
     }
 
     let report = Report::new(analysis.strings, build_info, analysis.result);

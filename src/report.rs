@@ -165,6 +165,7 @@ mod tests {
             template_instantiation_duration: 30,
             header_parse_duration: HashMap::from([(z_h, 5), (a_h, 9)]),
             header_inclusion_paths: BTreeMap::new(),
+            header_usage: HashMap::new(),
             function_template_instantiations: HashMap::new(),
             class_template_instantiations: HashMap::new(),
         };
@@ -181,6 +182,7 @@ mod tests {
                 template_instantiation_duration: 5,
                 header_parse_duration: HashMap::from([(m_h, 7)]),
                 header_inclusion_paths: BTreeMap::new(),
+                header_usage: HashMap::new(),
                 function_template_instantiations: HashMap::new(),
                 class_template_instantiations: HashMap::new(),
             },
@@ -263,6 +265,7 @@ mod tests {
                     template_instantiation_duration: 0,
                     header_parse_duration: HashMap::new(),
                     header_inclusion_paths: BTreeMap::new(),
+                    header_usage: HashMap::new(),
                     function_template_instantiations: HashMap::new(),
                     class_template_instantiations: HashMap::new(),
                 },

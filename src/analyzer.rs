@@ -33,6 +33,10 @@ pub struct UnitAnalysis {
     // The chain is stored as the prefix of includers only (the header itself is
     // the map key); the header's own name is not repeated in its chain.
     pub header_inclusion_paths: BTreeMap<StringId, BTreeMap<Vec<StringId>, i64>>,
+    // For each project header this unit includes: how it is used (unused,
+    // declaration-only, or needs definition).
+    #[serde(serialize_with = "crate::report::serialize_sorted_map")]
+    pub header_usage: HashMap<StringId, crate::header_usage::HeaderUsage>,
     #[serde(serialize_with = "crate::report::serialize_sorted_map")]
     pub function_template_instantiations: HashMap<StringId, TemplateInstantiation>,
     #[serde(serialize_with = "crate::report::serialize_sorted_map")]
@@ -95,6 +99,12 @@ impl UnitAnalysis {
 pub struct HeaderAnalysis {
     pub parse_duration: i64,
     pub num_inclusions: i64,
+    /// Units where the header was included but nothing from it was used.
+    pub unused_units: usize,
+    /// Units where the header was only needed for declarations.
+    pub forward_declarable_units: usize,
+    /// Units where the header's definition was required.
+    pub definition_required_units: usize,
     pub inclusion_paths: BTreeMap<Vec<StringId>, i64>,
 }
 
@@ -200,8 +210,28 @@ impl AnalysisResult {
                     .or_insert(HeaderAnalysis {
                         parse_duration: *duration,
                         num_inclusions: 1,
+                        unused_units: 0,
+                        forward_declarable_units: 0,
+                        definition_required_units: 0,
                         inclusion_paths: BTreeMap::new(),
                     });
+            }
+        }
+        for analysis in per_unit_analysis.values() {
+            for (header, usage) in &analysis.header_usage {
+                if let Some(header_analysis) = header_analysis.get_mut(header) {
+                    match usage {
+                        crate::header_usage::HeaderUsage::Unused => {
+                            header_analysis.unused_units += 1;
+                        }
+                        crate::header_usage::HeaderUsage::DeclarationOnly => {
+                            header_analysis.forward_declarable_units += 1;
+                        }
+                        crate::header_usage::HeaderUsage::NeedsDefinition => {
+                            header_analysis.definition_required_units += 1;
+                        }
+                    }
+                }
             }
         }
         for analysis in per_unit_analysis.values() {
@@ -300,6 +330,7 @@ pub fn analyze_unit(trace: &FileTrace, interner: &Mutex<Interner>) -> (StringId,
         template_instantiation_duration: 0,
         header_parse_duration: HashMap::new(),
         header_inclusion_paths: BTreeMap::new(),
+        header_usage: HashMap::new(),
         function_template_instantiations: HashMap::new(),
         class_template_instantiations: HashMap::new(),
     };
@@ -475,6 +506,8 @@ pub fn analyze_unit(trace: &FileTrace, interner: &Mutex<Interner>) -> (StringId,
 #[derive(Debug)]
 pub struct Analysis {
     pub strings: Vec<String>,
+    /// Project root the paths in `strings` are relative to, if known.
+    pub root: Option<String>,
     pub result: AnalysisResult,
 }
 
@@ -502,7 +535,7 @@ pub fn analyze(traces: Vec<FileTrace>) -> Analysis {
             .map(|trace| analyze_unit(trace, shared))
             .collect()
     });
-    finalize(&interner, AnalysisResult::from(unit_analysis))
+    finalize(&interner, None, AnalysisResult::from(unit_analysis))
 }
 
 /// Analyze the build directory using up to `jobs` worker threads.
@@ -510,10 +543,23 @@ pub fn analyze(traces: Vec<FileTrace>) -> Analysis {
 /// Each worker thread processes one trace file completely (parse -> tree ->
 /// analyze) and returns only the small per-unit result, so peak memory scales
 /// with the number of worker threads.
-pub fn analyze_build_dir(build_dir: &str, jobs: usize, excludes: &[String]) -> Analysis {
+pub fn analyze_build_dir(
+    build_dir: &str,
+    jobs: usize,
+    excludes: &[String],
+    header_usage: bool,
+) -> Analysis {
     let paths = crate::build_traces::glob_trace_paths(build_dir, excludes);
-    let interner = Mutex::new(Interner::with_root(project_root(build_dir)));
+    let root = project_root(build_dir);
+    let compile_commands = if header_usage {
+        crate::header_usage::CompileCommands::load(build_dir)
+    } else {
+        None
+    };
+    let interner = Mutex::new(Interner::with_root(root.clone()));
     let shared = &interner;
+    let root_ref = root.as_deref();
+    let compile_commands_ref = &compile_commands;
     let unit_analysis: HashMap<StringId, UnitAnalysis> = build_pool(jobs).install(move || {
         paths
             .into_par_iter()
@@ -526,16 +572,37 @@ pub fn analyze_build_dir(build_dir: &str, jobs: usize, excludes: &[String]) -> A
                     source_file: Some(source_file),
                     trace_tree,
                 };
-                Some(analyze_unit(&file_trace, shared))
+                let (unit_id, mut unit) = analyze_unit(&file_trace, shared);
+                if header_usage {
+                    let source = lock(shared).resolve(unit_id).to_string();
+                    let headers: Vec<String> = unit
+                        .header_parse_duration
+                        .keys()
+                        .map(|h| lock(shared).resolve(*h).to_string())
+                        .filter(|h| !h.starts_with('/'))
+                        .collect();
+                    if !headers.is_empty() {
+                        for (header, usage) in crate::header_usage::analyze_unit_header_usage(
+                            &source,
+                            root_ref,
+                            &headers,
+                            compile_commands_ref,
+                        ) {
+                            let header_id = lock(shared).intern(&header);
+                            unit.header_usage.insert(header_id, usage);
+                        }
+                    }
+                }
+                Some((unit_id, unit))
             })
             .collect()
     });
-    finalize(&interner, AnalysisResult::from(unit_analysis))
+    finalize(&interner, root, AnalysisResult::from(unit_analysis))
 }
 
 /// Sort the string table and remap every id so that identical inputs produce
 /// identical output bytes regardless of the order strings were first interned.
-fn finalize(interner: &Mutex<Interner>, result: AnalysisResult) -> Analysis {
+fn finalize(interner: &Mutex<Interner>, root: Option<String>, result: AnalysisResult) -> Analysis {
     let strings = lock(interner).take_table();
     let mut sorted = strings.clone();
     sorted.sort();
@@ -609,6 +676,7 @@ fn finalize(interner: &Mutex<Interner>, result: AnalysisResult) -> Analysis {
 
     Analysis {
         strings: sorted,
+        root,
         result: AnalysisResult {
             unit_analysis,
             header_analysis,
@@ -726,6 +794,7 @@ mod tests {
             template_instantiation_duration: 0,
             header_parse_duration: HashMap::new(),
             header_inclusion_paths: BTreeMap::new(),
+            header_usage: HashMap::new(),
             function_template_instantiations: HashMap::new(),
             class_template_instantiations: HashMap::new(),
         }
@@ -735,6 +804,9 @@ mod tests {
         HeaderAnalysis {
             parse_duration,
             num_inclusions: 1,
+            unused_units: 0,
+            forward_declarable_units: 0,
+            definition_required_units: 0,
             inclusion_paths: BTreeMap::new(),
         }
     }
@@ -814,6 +886,9 @@ mod tests {
         let header = HeaderAnalysis {
             parse_duration: 300,
             num_inclusions: 3,
+            unused_units: 0,
+            forward_declarable_units: 0,
+            definition_required_units: 0,
             inclusion_paths: BTreeMap::new(),
         };
         assert_eq!(header.avg_inclusion_time(), 100);
@@ -1205,7 +1280,7 @@ mod tests {
         );
         std::fs::write(root.join("build/main.cpp.json"), json).unwrap();
 
-        let analysis = analyze_build_dir(root.join("build").to_str().unwrap(), 2, &[]);
+        let analysis = analyze_build_dir(root.join("build").to_str().unwrap(), 2, &[], false);
         std::fs::remove_dir_all(&root).ok();
 
         assert!(analysis.id_of("src/main.cpp").is_some());
@@ -1226,7 +1301,7 @@ mod tests {
         write_trace_file(&dir, "broken.cpp.json", "{ not valid json");
         write_trace_file(&dir, "ignored.json", valid);
 
-        let result = analyze_build_dir(dir.to_str().unwrap(), 2, &[]);
+        let result = analyze_build_dir(dir.to_str().unwrap(), 2, &[], false);
         std::fs::remove_dir_all(&dir).ok();
 
         assert_eq!(result.result.unit_analysis.len(), 1);

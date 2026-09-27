@@ -51,6 +51,11 @@ pub struct AnalyzeArgs {
     /// Glob patterns of trace files to exclude from the analysis; may be repeated
     #[arg(short, long)]
     pub exclude: Vec<String>,
+
+    /// Analyze which included headers are unused or could be replaced by forward
+    /// declarations
+    #[arg(long)]
+    pub header_usage: bool,
 }
 
 #[derive(Debug, Args)]
@@ -273,5 +278,16 @@ mod tests {
         };
         assert_eq!(args.base, PathBuf::from("base.msgpack"));
         assert_eq!(args.target, PathBuf::from("target.msgpack"));
+    }
+
+    #[test]
+    fn test_header_usage_flag() {
+        let cli = Cli::try_parse_from(["build-time-insight", "analyze", "src", "--header-usage"])
+            .unwrap();
+        let args = match &cli.command {
+            Command::Analyze(args) => args,
+            _ => panic!("expected Analyze subcommand"),
+        };
+        assert!(args.header_usage);
     }
 }
