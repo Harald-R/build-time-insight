@@ -548,8 +548,22 @@ pub fn analyze_build_dir(
     jobs: usize,
     excludes: &[String],
     header_usage: bool,
+    show_progress: bool,
 ) -> Analysis {
     let paths = crate::build_traces::glob_trace_paths(build_dir, excludes);
+    let bar = if show_progress {
+        let bar = indicatif::ProgressBar::new(paths.len() as u64);
+        bar.set_style(
+            indicatif::ProgressStyle::with_template(
+                "{bar:40} {pos}/{len} units [{elapsed_precise}]",
+            )
+            .expect("valid progress template")
+            .progress_chars("=>-"),
+        );
+        Some(bar)
+    } else {
+        None
+    };
     let root = project_root(build_dir);
     let compile_commands = if header_usage {
         crate::header_usage::CompileCommands::load(build_dir)
@@ -560,6 +574,7 @@ pub fn analyze_build_dir(
     let shared = &interner;
     let root_ref = root.as_deref();
     let compile_commands_ref = &compile_commands;
+    let bar_ref = &bar;
     let unit_analysis: HashMap<StringId, UnitAnalysis> = build_pool(jobs).install(move || {
         paths
             .into_par_iter()
@@ -573,6 +588,9 @@ pub fn analyze_build_dir(
                     trace_tree,
                 };
                 let (unit_id, mut unit) = analyze_unit(&file_trace, shared);
+                if let Some(bar) = bar_ref {
+                    bar.inc(1);
+                }
                 if header_usage {
                     let source = lock(shared).resolve(unit_id).to_string();
                     let headers: Vec<String> = unit
@@ -597,6 +615,9 @@ pub fn analyze_build_dir(
             })
             .collect()
     });
+    if let Some(bar) = &bar {
+        bar.finish_and_clear();
+    }
     finalize(&interner, root, AnalysisResult::from(unit_analysis))
 }
 
@@ -1280,7 +1301,8 @@ mod tests {
         );
         std::fs::write(root.join("build/main.cpp.json"), json).unwrap();
 
-        let analysis = analyze_build_dir(root.join("build").to_str().unwrap(), 2, &[], false);
+        let analysis =
+            analyze_build_dir(root.join("build").to_str().unwrap(), 2, &[], false, false);
         std::fs::remove_dir_all(&root).ok();
 
         assert!(analysis.id_of("src/main.cpp").is_some());
@@ -1301,7 +1323,7 @@ mod tests {
         write_trace_file(&dir, "broken.cpp.json", "{ not valid json");
         write_trace_file(&dir, "ignored.json", valid);
 
-        let result = analyze_build_dir(dir.to_str().unwrap(), 2, &[], false);
+        let result = analyze_build_dir(dir.to_str().unwrap(), 2, &[], false, false);
         std::fs::remove_dir_all(&dir).ok();
 
         assert_eq!(result.result.unit_analysis.len(), 1);

@@ -3,6 +3,7 @@ use build_time_insight::interner::StringId;
 use build_time_insight::report::{self, Report};
 
 use build_time_insight::{analyzer, build_info, cli};
+use std::io::IsTerminal;
 
 fn main() -> anyhow::Result<()> {
     let cli = cli::Cli::parse();
@@ -11,13 +12,14 @@ fn main() -> anyhow::Result<()> {
     )
     .init();
 
+    let show_progress = !cli.quiet && std::io::stderr().is_terminal();
     match cli.command {
-        cli::Command::Analyze(args) => run_analyze(&args),
+        cli::Command::Analyze(args) => run_analyze(&args, show_progress),
         cli::Command::Compare(args) => run_compare(&args),
     }
 }
 
-fn run_analyze(args: &cli::AnalyzeArgs) -> anyhow::Result<()> {
+fn run_analyze(args: &cli::AnalyzeArgs, show_progress: bool) -> anyhow::Result<()> {
     let build_dir = args.build_dir.to_string_lossy().into_owned();
     let jobs = args.jobs();
     let limit = args.limit();
@@ -27,7 +29,13 @@ fn run_analyze(args: &cli::AnalyzeArgs) -> anyhow::Result<()> {
     let build_info = build_info::extract_build_info(&build_dir);
     log::info!("Build info: {:#?}", build_info);
 
-    let analysis = analyzer::analyze_build_dir(&build_dir, jobs, &args.exclude, args.header_usage);
+    let analysis = analyzer::analyze_build_dir(
+        &build_dir,
+        jobs,
+        &args.exclude,
+        args.header_usage,
+        show_progress,
+    );
 
     println!("Longest files to compile:");
     for item in analysis.result.longest_unit_compilations(limit).enumerate() {
