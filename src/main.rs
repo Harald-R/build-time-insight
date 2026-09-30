@@ -12,14 +12,15 @@ fn main() -> anyhow::Result<()> {
     )
     .init();
 
-    let show_progress = !cli.quiet && std::io::stderr().is_terminal();
+    let quiet = cli.quiet;
     match cli.command {
-        cli::Command::Analyze(args) => run_analyze(&args, show_progress),
+        cli::Command::Analyze(args) => run_analyze(&args, quiet),
         cli::Command::Compare(args) => run_compare(&args),
     }
 }
 
-fn run_analyze(args: &cli::AnalyzeArgs, show_progress: bool) -> anyhow::Result<()> {
+fn run_analyze(args: &cli::AnalyzeArgs, quiet: bool) -> anyhow::Result<()> {
+    let show_progress = !quiet && !args.no_progress && std::io::stderr().is_terminal();
     let build_dir = args.build_dir.to_string_lossy().into_owned();
     let jobs = args.jobs();
     let limit = args.limit();

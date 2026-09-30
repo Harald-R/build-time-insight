@@ -56,6 +56,10 @@ pub struct AnalyzeArgs {
     /// declarations
     #[arg(long)]
     pub header_usage: bool,
+
+    /// Disable the progress bar
+    #[arg(long)]
+    pub no_progress: bool,
 }
 
 #[derive(Debug, Args)]
@@ -289,5 +293,16 @@ mod tests {
             _ => panic!("expected Analyze subcommand"),
         };
         assert!(args.header_usage);
+    }
+
+    #[test]
+    fn test_no_progress_flag() {
+        let cli =
+            Cli::try_parse_from(["build-time-insight", "analyze", "src", "--no-progress"]).unwrap();
+        let args = match &cli.command {
+            Command::Analyze(args) => args,
+            _ => panic!("expected Analyze subcommand"),
+        };
+        assert!(args.no_progress);
     }
 }
