@@ -657,6 +657,11 @@ fn finalize(interner: &Mutex<Interner>, root: Option<String>, result: AnalysisRe
                     )
                 })
                 .collect();
+            ua.header_usage = ua
+                .header_usage
+                .into_iter()
+                .map(|(h, usage)| (remap_id(h), usage))
+                .collect();
             ua.function_template_instantiations = ua
                 .function_template_instantiations
                 .into_iter()
@@ -1021,6 +1026,45 @@ mod tests {
         let c_h_analysis = &result.header_analysis[&c_h];
         assert_eq!(c_h_analysis.parse_duration, 30);
         assert_eq!(c_h_analysis.num_inclusions, 1);
+    }
+
+    #[test]
+    fn finalize_remaps_header_usage_ids_with_string_table() {
+        // Intern strings in an order that differs from their sorted order so
+        // pre-sort ids differ from post-sort ids. header_usage previously kept
+        // the stale pre-sort ids, so per-unit usage could not be matched back
+        // to header_analysis keys.
+        let mut interner = Interner::default();
+        let z_cpp = interner.intern("z.cpp");
+        let a_h = interner.intern("a.h");
+        let b_cpp = interner.intern("b.cpp");
+        let m_h = interner.intern("m.h");
+
+        let mut u = unit_analysis(10);
+        u.header_parse_duration = HashMap::from([(a_h, 5), (m_h, 9)]);
+        u.header_usage = HashMap::from([
+            (a_h, crate::header_usage::HeaderUsage::Unused),
+            (m_h, crate::header_usage::HeaderUsage::DeclarationOnly),
+        ]);
+        let result = AnalysisResult::from(HashMap::from([
+            (z_cpp, u),
+            (b_cpp, unit_analysis(20)),
+        ]));
+
+        let analysis = finalize(&Mutex::new(interner), None, result);
+
+        // Every header_usage key must now be a header_analysis key for the
+        // same header, and still resolve to a parsed header.
+        for unit in analysis.result.unit_analysis.values() {
+            for h in unit.header_usage.keys() {
+                assert!(
+                    analysis.result.header_analysis.contains_key(h),
+                    "header_usage id '{}' not remapped to a header_analysis key",
+                    analysis.resolve(*h)
+                );
+                assert!(unit.header_parse_duration.contains_key(h));
+            }
+        }
     }
 
     #[test]
