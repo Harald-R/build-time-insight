@@ -1,0 +1,6 @@
+# Build outputs and generated trace files (regenerated via build-traces.sh)
+/build-*/
+*.json
+
+# Generated report artifact
+/out.msgpack
