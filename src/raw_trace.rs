@@ -1,3 +1,5 @@
+//! Defines the low-level trace event types decoded from clang output.
+
 use serde::Deserialize;
 
 pub const TOTAL_EXECUTE_COMPILER: &str = "Total ExecuteCompiler";
@@ -14,25 +16,37 @@ pub const SOURCE: &str = "Source";
 /// keys are ignored, avoiding the cost of materializing the full JSON value.
 #[derive(Deserialize, Debug, Clone, Default)]
 pub struct TraceArgs {
+    /// Detail text of the event.
     pub detail: Option<String>,
 }
 
+/// A trace event from the JSON trace file.
 #[derive(Deserialize, Debug, Clone)]
 pub struct TraceEvent {
-    pub name: String,        // Name of the event
-    pub cat: Option<String>, // Event categories
-    pub ph: String,          // Event type (phase)
-    pub pid: i64,            // Process ID
-    pub tid: i64,            // Thread ID
-    pub id: Option<i64>,     // ID (used for async events)
-    pub ts: i64,             // Event timestamp (in us)
-    pub dur: Option<i64>,    // Event duration (in us)
+    /// Name of the event.
+    pub name: String,
+    /// Categories of the event.
+    pub cat: Option<String>,
+    /// Phase type of the event.
+    pub ph: String,
+    /// Process ID of the event.
+    pub pid: i64,
+    /// Thread ID of the event.
+    pub tid: i64,
+    /// ID of the event, for async events.
+    pub id: Option<i64>,
+    /// Timestamp of the event, in microseconds.
+    pub ts: i64,
+    /// Duration of the event, in microseconds.
+    pub dur: Option<i64>,
     #[serde(default)]
-    pub args: Option<TraceArgs>, // Extra arguments (only the fields we use)
+    /// Extra arguments of the event.
+    pub args: Option<TraceArgs>,
 }
 
 impl TraceEvent {
     #[inline]
+    /// Check whether this event encloses another event.
     pub fn encloses(&self, other: &Self) -> bool {
         let self_dur = self.dur.unwrap_or(0);
         let other_dur = other.dur.unwrap_or(0);
@@ -40,9 +54,12 @@ impl TraceEvent {
     }
 }
 
+/// A trace event file from the JSON trace.
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct TraceEventFile {
+    /// Trace events in the file.
     pub trace_events: Vec<TraceEvent>,
+    /// Beginning time of the trace, in microseconds.
     pub beginning_of_time: i64,
 }

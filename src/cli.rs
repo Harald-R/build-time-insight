@@ -1,3 +1,5 @@
+//! Provides the command-line interface.
+
 use std::path::PathBuf;
 use std::thread;
 
@@ -8,70 +10,76 @@ use clap::{Args, Parser, Subcommand};
     version,
     about = "Analyze clang -ftime-trace output to find C++ build-time bottlenecks"
 )]
+/// Defines the command-line arguments for the application.
 pub struct Cli {
     #[command(subcommand)]
+    /// Selects the command to run.
     pub command: Command,
 
-    /// Increase logging verbosity; repeat for more detail
+    /// Increase logging verbosity; repeat for more detail.
     #[arg(short, long, global = true, action = clap::ArgAction::Count)]
     pub verbose: u8,
 
-    /// Only log errors
+    /// Only log errors.
     #[arg(short, long, global = true)]
     pub quiet: bool,
 }
 
+/// Defines the commands that the tool can run.
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Analyze a build directory and write a portable report
+    /// Analyze a build directory and write a portable report.
     Analyze(AnalyzeArgs),
 
-    /// Compare two reports and print per-unit duration changes
+    /// Compare two reports and print per-unit duration changes.
     Compare(CompareArgs),
 }
 
+/// Defines the arguments for the analyze command.
 #[derive(Debug, Args)]
 pub struct AnalyzeArgs {
-    /// Build directory containing the clang `-ftime-trace` JSON files
+    /// Build directory containing the clang `-ftime-trace` JSON files.
     #[arg(value_parser = validate_build_dir)]
     pub build_dir: PathBuf,
 
-    /// Number of parallel worker threads to use for the analysis
+    /// Number of parallel worker threads to use for the analysis.
     #[arg(short, long, value_parser = parse_jobs)]
     pub jobs: Option<usize>,
 
-    /// Path where the report is written
+    /// Path where the report is written.
     #[arg(short, long)]
     pub output: Option<PathBuf>,
 
-    /// Number of entries to show in each top-N list
+    /// Number of entries to show in each top-N list.
     #[arg(short, long, value_parser = parse_limit)]
     pub limit: Option<usize>,
 
-    /// Glob patterns of trace files to exclude from the analysis; may be repeated
+    /// Glob patterns of trace files to exclude from the analysis; may be repeated.
     #[arg(short, long)]
     pub exclude: Vec<String>,
 
-    /// Analyze which included headers are unused or could be replaced by forward
+    /// Analyze which included headers are unused or could be replaced by forward.
     /// declarations
     #[arg(long)]
     pub header_usage: bool,
 
-    /// Disable the progress bar
+    /// Disable the progress bar.
     #[arg(long)]
     pub no_progress: bool,
 }
 
+/// Defines the arguments for the compare command.
 #[derive(Debug, Args)]
 pub struct CompareArgs {
-    /// Baseline report file
+    /// Baseline report file.
     pub base: PathBuf,
 
-    /// Report file to compare against the baseline
+    /// Report file to compare against the baseline.
     pub target: PathBuf,
 }
 
 impl Cli {
+    /// Parses the command-line arguments.
     pub fn parse() -> Self {
         <Self as Parser>::parse()
     }
@@ -104,6 +112,7 @@ impl AnalyzeArgs {
     }
 }
 
+/// Returns the number of available system threads.
 pub fn default_jobs() -> usize {
     thread::available_parallelism().map_or(1, |n| n.get())
 }

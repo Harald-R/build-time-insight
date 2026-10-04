@@ -1,3 +1,4 @@
+//! Parses `-ftime-trace` JSON files into an event tree.
 use log;
 use rustc_hash::{FxHashMap, FxHashSet};
 use std::{
@@ -93,18 +94,26 @@ pub fn source_file_from_trace(trace: &TraceEventFile) -> String {
 
 type NodeId = usize;
 
+/// A single node in a build trace tree.
 #[derive(Debug)]
 pub struct TraceNode {
+    /// Unique index of the node in the tree.
     pub id: NodeId,
+    /// Trace event that this node represents.
     pub trace: TraceEvent,
+    /// Index of the parent node, if present.
     pub parent: Option<NodeId>,
+    /// Indexes of the child nodes.
     pub children: Vec<NodeId>,
 }
 
+/// A tree that groups trace events by category.
 #[derive(Debug, Default)]
 pub struct TraceTree {
     // There can be multiple roots for each category found (key PID, value node IDs)
+    /// Root node indexes for each category.
     pub roots: FxHashMap<String, Vec<NodeId>>,
+    /// All nodes in the tree.
     pub nodes: Vec<TraceNode>,
 }
 
@@ -166,6 +175,7 @@ fn fuse_async_trace_events(events: &mut Vec<TraceEvent>) {
 }
 
 impl TraceTree {
+    /// Build a tree from the given trace events.
     pub fn from(mut trace_events: Vec<TraceEvent>) -> Self {
         if trace_events.is_empty() {
             log::trace!("Empty trace events");
@@ -268,6 +278,7 @@ impl TraceTree {
         tree
     }
 
+    /// Visit each node with the given closure.
     pub fn traverse<F>(&self, mut f: F)
     where
         F: FnMut(&TraceNode) -> LoopControl,
@@ -319,6 +330,7 @@ impl TraceTree {
         }
     }
 
+    /// Print the tree at the given depth.
     pub fn print_tree(&self, depth: usize) {
         for (cat, roots) in self.roots.iter() {
             log::trace!("Category '{cat}'");
@@ -329,10 +341,14 @@ impl TraceTree {
     }
 }
 
+/// Trace data for a single translation unit.
 #[derive(Debug)]
 pub struct FileTrace {
+    /// Path to the trace file.
     pub trace_file: String,
+    /// Path to the source file, if known.
     pub source_file: Option<String>,
+    /// Tree built from the trace file.
     pub trace_tree: TraceTree,
 }
 

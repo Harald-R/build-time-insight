@@ -1,3 +1,5 @@
+//! Reconstructs compile-time events and aggregates per-unit results.
+
 use std::cmp::min;
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
@@ -22,34 +24,46 @@ fn build_pool(jobs: usize) -> rayon::ThreadPool {
 static POOL: LazyLock<rayon::ThreadPool> =
     LazyLock::new(|| build_pool(std::thread::available_parallelism().map_or(1, |n| n.get())));
 
+/// Stores the analysis result for one translation unit.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UnitAnalysis {
+    /// Total duration of the compilation.
     pub total_duration: i64,
+    /// Duration of the frontend phase.
     pub frontend_duration: i64,
+    /// Duration of the backend phase.
     pub backend_duration: i64,
+    /// Total duration of template instantiation.
     pub template_instantiation_duration: i64,
+    /// Duration of header parsing per header.
     #[serde(serialize_with = "crate::report::serialize_sorted_map")]
     pub header_parse_duration: HashMap<StringId, i64>,
-    // The chain is stored as the prefix of includers only (the header itself is
-    // the map key); the header's own name is not repeated in its chain.
+    /// Inclusion chain counts per header.
+    /// The chain is stored as the prefix of includers only (the header itself is
+    /// the map key); the header's own name is not repeated in its chain.
     pub header_inclusion_paths: BTreeMap<StringId, BTreeMap<Vec<StringId>, i64>>,
-    // For each project header this unit includes: how it is used (unused,
-    // declaration-only, or needs definition).
+    /// Usage type of each included header.
     #[serde(serialize_with = "crate::report::serialize_sorted_map")]
     pub header_usage: HashMap<StringId, crate::header_usage::HeaderUsage>,
+    /// Duration and count per function template instantiation.
     #[serde(serialize_with = "crate::report::serialize_sorted_map")]
     pub function_template_instantiations: HashMap<StringId, TemplateInstantiation>,
+    /// Duration and count per class template instantiation.
     #[serde(serialize_with = "crate::report::serialize_sorted_map")]
     pub class_template_instantiations: HashMap<StringId, TemplateInstantiation>,
 }
 
+/// Stores the duration and count for one template instantiation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TemplateInstantiation {
+    /// Total duration of the instantiations.
     pub total_duration: i64,
+    /// Number of instantiations.
     pub num_instantiations: i64,
 }
 
 impl TemplateInstantiation {
+    /// Creates a template instantiation with the given duration.
     pub fn new(duration: i64) -> Self {
         Self {
             total_duration: duration,
@@ -57,17 +71,19 @@ impl TemplateInstantiation {
         }
     }
 
+    /// Adds one instantiation with the given duration.
     pub fn add(&mut self, duration: i64) {
         self.total_duration += duration;
         self.num_instantiations += 1;
     }
 
+    /// Merges the values of another instantiation into this one.
     pub fn merge(&mut self, other: &Self) {
         self.total_duration += other.total_duration;
         self.num_instantiations += other.num_instantiations;
     }
 
-    /// Average duration per instantiation, in microseconds
+    /// Average duration per instantiation, in microseconds.
     pub fn avg_duration(&self) -> i64 {
         if self.num_instantiations == 0 {
             0
@@ -78,6 +94,7 @@ impl TemplateInstantiation {
 }
 
 impl UnitAnalysis {
+    /// Returns the function template instantiation with the largest duration.
     pub fn largest_function_template_instantiation(
         &self,
     ) -> Option<(&StringId, &TemplateInstantiation)> {
@@ -86,6 +103,7 @@ impl UnitAnalysis {
             .max_by(|a, b| a.1.total_duration.cmp(&b.1.total_duration))
     }
 
+    /// Returns the class template instantiation with the largest duration.
     pub fn largest_class_template_instantiation(
         &self,
     ) -> Option<(&StringId, &TemplateInstantiation)> {
@@ -95,9 +113,12 @@ impl UnitAnalysis {
     }
 }
 
+/// Stores the analysis result for one header.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct HeaderAnalysis {
+    /// Total duration of header parsing.
     pub parse_duration: i64,
+    /// Number of times the header was included.
     pub num_inclusions: i64,
     /// Units where the header was included but nothing from it was used.
     pub unused_units: usize,
@@ -105,6 +126,7 @@ pub struct HeaderAnalysis {
     pub forward_declarable_units: usize,
     /// Units where the header's definition was required.
     pub definition_required_units: usize,
+    /// Number of inclusions per inclusion chain.
     pub inclusion_paths: BTreeMap<Vec<StringId>, i64>,
 }
 
@@ -119,19 +141,25 @@ impl HeaderAnalysis {
     }
 }
 
+/// Stores the analysis results for one build.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct AnalysisResult {
+    /// Analysis results per translation unit.
     #[serde(serialize_with = "crate::report::serialize_sorted_map")]
     pub unit_analysis: HashMap<StringId, UnitAnalysis>,
+    /// Analysis results per header.
     #[serde(serialize_with = "crate::report::serialize_sorted_map")]
     pub header_analysis: HashMap<StringId, HeaderAnalysis>,
+    /// Duration and count per function template instantiation.
     #[serde(serialize_with = "crate::report::serialize_sorted_map")]
     pub function_template_instantiations: HashMap<StringId, TemplateInstantiation>,
+    /// Duration and count per class template instantiation.
     #[serde(serialize_with = "crate::report::serialize_sorted_map")]
     pub class_template_instantiations: HashMap<StringId, TemplateInstantiation>,
 }
 
 impl AnalysisResult {
+    /// Builds a complete analysis result from per-unit results.
     pub fn from(unit_analysis: HashMap<StringId, UnitAnalysis>) -> Self {
         let header_analysis = Self::get_per_header_analysis(&unit_analysis);
         let (function_template_instantiations, class_template_instantiations) =
@@ -174,6 +202,7 @@ impl AnalysisResult {
         )
     }
 
+    /// Returns the template instantiations with the largest durations.
     pub fn longest_template_instantiations(
         &self,
         num_items: usize,
@@ -249,6 +278,7 @@ impl AnalysisResult {
         header_analysis
     }
 
+    /// Returns the translation units with the longest compile durations.
     pub fn longest_unit_compilations(
         &self,
         num_items: usize,
@@ -259,6 +289,7 @@ impl AnalysisResult {
         })
     }
 
+    /// Returns the headers with the longest parse durations.
     pub fn longest_headers_parse_duration(
         &self,
         num_items: usize,
@@ -320,6 +351,7 @@ fn project_root(build_dir: &str) -> Option<String> {
     }
 }
 
+/// Analyzes one trace file and returns its analysis result.
 pub fn analyze_unit(trace: &FileTrace, interner: &Mutex<Interner>) -> (StringId, UnitAnalysis) {
     let source_file = trace.source_file.as_deref().unwrap_or(&trace.trace_file);
     let source_file_id = intern_path(interner, source_file);
@@ -505,9 +537,11 @@ pub fn analyze_unit(trace: &FileTrace, interner: &Mutex<Interner>) -> (StringId,
 /// plus the string table used to resolve its `u32` keys.
 #[derive(Debug)]
 pub struct Analysis {
+    /// Stores the sorted string table.
     pub strings: Vec<String>,
     /// Project root the paths in `strings` are relative to, if known.
     pub root: Option<String>,
+    /// Stores the analysis results.
     pub result: AnalysisResult,
 }
 
@@ -526,6 +560,7 @@ impl Analysis {
     }
 }
 
+/// Analyzes the given trace files and returns the combined result.
 pub fn analyze(traces: Vec<FileTrace>) -> Analysis {
     let interner = Mutex::new(Interner::default());
     let shared = &interner;
@@ -1046,10 +1081,7 @@ mod tests {
             (a_h, crate::header_usage::HeaderUsage::Unused),
             (m_h, crate::header_usage::HeaderUsage::DeclarationOnly),
         ]);
-        let result = AnalysisResult::from(HashMap::from([
-            (z_cpp, u),
-            (b_cpp, unit_analysis(20)),
-        ]));
+        let result = AnalysisResult::from(HashMap::from([(z_cpp, u), (b_cpp, unit_analysis(20))]));
 
         let analysis = finalize(&Mutex::new(interner), None, result);
 

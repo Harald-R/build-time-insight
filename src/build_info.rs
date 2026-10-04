@@ -1,3 +1,5 @@
+//! Provides the build information of the project.
+
 use std::{
     fs, io,
     path::{Path, PathBuf},
@@ -6,24 +8,36 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
+/// Describes a build tool.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Tool {
+    /// Name of the tool.
     pub name: String,
+    /// Version of the tool.
     pub version: String,
 }
 
+/// Describes the build toolchain.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Toolchain {
-    pub build_system: Option<Tool>, // e.g. CMake
-    pub generator: Option<Tool>,    // e.g. Ninja
-    pub cxx_compiler: Option<Tool>, // e.g. clang++
-    pub c_compiler: Option<Tool>,   // e.g. clang
-    pub linker: Option<Tool>,       // e.g. lld
+    /// Build system of the project (e.g. CMake).
+    pub build_system: Option<Tool>,
+    /// Generator of the build (e.g. Ninja).
+    pub generator: Option<Tool>,
+    /// C++ compiler of the build (e.g. clang++).
+    pub cxx_compiler: Option<Tool>,
+    /// C compiler of the build (e.g. clang).
+    pub c_compiler: Option<Tool>,
+    /// Linker of the build (e.g. lld).
+    pub linker: Option<Tool>,
 }
 
+/// Describes the build information.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct BuildInfo {
+    /// Toolchain of the build.
     pub toolchain: Option<Toolchain>,
+    /// Git commit of the build.
     pub git_commit: Option<String>,
 }
 
@@ -270,6 +284,7 @@ fn extract_git_commit(build_dir: &str) -> Option<String> {
     git_commit_from_output(output.status.success(), output.stdout)
 }
 
+/// Extracts the build information from the build directory.
 pub fn extract_build_info(build_dir: &str) -> BuildInfo {
     let toolchain = match get_cmake_cache_content(build_dir) {
         Ok(cache_content) => {

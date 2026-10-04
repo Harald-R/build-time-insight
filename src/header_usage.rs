@@ -1,3 +1,4 @@
+//! Classifies how each translation unit uses its included headers.
 use std::fs;
 use std::io::{BufReader, Cursor, Read};
 use std::path::Path;
@@ -46,6 +47,7 @@ pub struct CompileCommands {
 }
 
 impl CompileCommands {
+    /// Load the compile commands from the build directory.
     pub fn load(build_dir: &str) -> Option<CompileCommands> {
         let mut dir = Path::new(build_dir);
         loop {

@@ -1,3 +1,5 @@
+//! Serializes and deserializes the portable analysis report.
+
 use std::{
     collections::HashMap,
     fs::File,
@@ -12,12 +14,16 @@ use thiserror::Error;
 use crate::interner::StringId;
 use crate::{analyzer::AnalysisResult, build_info::BuildInfo};
 
+/// Reports a failure to write or read a report.
 #[derive(Debug, Error)]
 pub enum ReportError {
+    /// Indicates an I/O error.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+    /// Indicates a message-pack encoding error.
     #[error("Encode error: {0}")]
     Encode(#[from] rmp_serde::encode::Error),
+    /// Indicates a message-pack decoding error.
     #[error("Decode error: {0}")]
     Decode(#[from] rmp_serde::decode::Error),
 }
@@ -61,15 +67,19 @@ where
     SortedRef(map).serialize(serializer)
 }
 
+/// Stores a complete build-time analysis report.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Report {
     /// String table backing the `u32` keys in `analysis`.
     pub strings: Vec<String>,
+    /// Stores information about the build.
     pub build_info: BuildInfo,
+    /// Stores the per-unit analysis results.
     pub analysis: AnalysisResult,
 }
 
 impl Report {
+    /// Creates a new report from the given data.
     pub fn new(strings: Vec<String>, build_info: BuildInfo, analysis: AnalysisResult) -> Self {
         Self {
             strings,
@@ -92,6 +102,7 @@ impl Report {
     }
 }
 
+/// Writes the report to the file at `path`.
 pub fn write_report(report: &Report, path: &Path) -> Result<(), ReportError> {
     let file = File::create(path)?;
     let writer = BufWriter::new(file);
@@ -102,6 +113,7 @@ pub fn write_report(report: &Report, path: &Path) -> Result<(), ReportError> {
     Ok(())
 }
 
+/// Reads a report from the file at `path`.
 pub fn read_report(path: &Path) -> Result<Report, ReportError> {
     let file = File::open(path)?;
     let reader = BufReader::new(file);

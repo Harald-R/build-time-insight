@@ -1,3 +1,5 @@
+//! C++ build time analyzer.
+
 use build_time_insight::analyzer::HeaderAnalysis;
 use build_time_insight::interner::StringId;
 use build_time_insight::report::{self, Report};

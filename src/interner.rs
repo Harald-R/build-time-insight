@@ -1,3 +1,5 @@
+//! Maps repeated strings to compact integer identifiers.
+
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
