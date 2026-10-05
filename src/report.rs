@@ -1,7 +1,7 @@
 //! Serializes and deserializes the portable analysis report.
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap, HashSet},
     fs::File,
     io::{BufReader, BufWriter},
     path::Path,
@@ -12,7 +12,10 @@ use serde::{Deserialize, Serialize, Serializer, ser::SerializeMap};
 use thiserror::Error;
 
 use crate::interner::StringId;
-use crate::{analyzer::AnalysisResult, build_info::BuildInfo};
+use crate::{
+    analyzer::{AnalysisResult, TemplateInstantiation},
+    build_info::BuildInfo,
+};
 
 /// Reports a failure to write or read a report.
 #[derive(Debug, Error)]
@@ -100,6 +103,210 @@ impl Report {
             .ok()
             .map(|i| StringId::from(i as u32))
     }
+
+    /// Reduces the report size. It keeps the largest templates and the
+    /// largest headers per unit, caps the inclusion chains, and then drops
+    /// strings that nothing references.
+    ///
+    /// `max_per_unit` limits the headers and templates kept for each unit.
+    /// `max_templates` limits the templates kept for the whole build.
+    pub fn slim(&mut self, max_per_unit: usize, max_templates: usize) {
+        prune_analysis(&mut self.analysis, max_per_unit, max_templates);
+        self.compact_strings();
+    }
+
+    /// Removes strings that the analysis does not reference.
+    fn compact_strings(&mut self) {
+        let mut used = vec![false; self.strings.len()];
+        collect_used_strings(&self.analysis, &mut used);
+
+        let mut remap = vec![u32::MAX; self.strings.len()];
+        let mut strings = Vec::new();
+        for (index, text) in self.strings.iter().enumerate() {
+            if used[index] {
+                remap[index] = strings.len() as u32;
+                strings.push(text.clone());
+            }
+        }
+        remap_analysis(&mut self.analysis, &remap);
+        self.strings = strings;
+    }
+}
+
+/// The number of inclusion chains kept for each header.
+const MAX_CHAINS: usize = 8;
+
+/// Keeps the largest `keep` entries of a map, ranked by `score`.
+fn keep_largest<K, V>(map: &mut HashMap<K, V>, keep: usize, score: impl Fn(&V) -> i64)
+where
+    K: Eq + std::hash::Hash + Copy,
+{
+    if keep == 0 || map.len() <= keep {
+        return;
+    }
+    let mut entries: Vec<(K, i64)> = map.iter().map(|(k, v)| (*k, score(v))).collect();
+    entries.sort_by_key(|e| std::cmp::Reverse(e.1));
+    let keep_keys: HashSet<K> = entries.into_iter().take(keep).map(|(k, _)| k).collect();
+    map.retain(|k, _| keep_keys.contains(k));
+}
+
+/// Keeps the largest `keep` chains of a map, ranked by `score`.
+fn keep_largest_chains(
+    map: &mut BTreeMap<Vec<StringId>, i64>,
+    keep: usize,
+    score: impl Fn(i64) -> i64,
+) {
+    if keep == 0 || map.len() <= keep {
+        return;
+    }
+    let mut entries: Vec<(Vec<StringId>, i64)> =
+        map.iter().map(|(k, v)| (k.clone(), score(*v))).collect();
+    entries.sort_by_key(|e| std::cmp::Reverse(e.1));
+    let keep_keys: HashSet<Vec<StringId>> = entries.into_iter().take(keep).map(|(k, _)| k).collect();
+    map.retain(|k, _| keep_keys.contains(k));
+}
+
+/// Prunes the per-unit maps and the build-wide template maps.
+fn prune_analysis(analysis: &mut AnalysisResult, max_per_unit: usize, max_templates: usize) {
+    for unit in analysis.unit_analysis.values_mut() {
+        // Keep the slowest headers.
+        keep_largest(&mut unit.header_parse_duration, max_per_unit, |v| *v);
+        let kept_headers: HashSet<StringId> = unit.header_parse_duration.keys().copied().collect();
+        unit.header_inclusion_paths
+            .retain(|header, _| kept_headers.contains(header));
+        for chains in unit.header_inclusion_paths.values_mut() {
+            keep_largest_chains(chains, MAX_CHAINS, |v| v);
+        }
+        unit.header_usage
+            .retain(|header, _| kept_headers.contains(header));
+
+        // Keep the largest template instantiations.
+        keep_largest(&mut unit.function_template_instantiations, max_per_unit, |t| {
+            t.total_duration
+        });
+        keep_largest(&mut unit.class_template_instantiations, max_per_unit, |t| {
+            t.total_duration
+        });
+    }
+
+    keep_largest(
+        &mut analysis.function_template_instantiations,
+        max_templates,
+        |t| t.total_duration,
+    );
+    keep_largest(
+        &mut analysis.class_template_instantiations,
+        max_templates,
+        |t| t.total_duration,
+    );
+
+    for header in analysis.header_analysis.values_mut() {
+        keep_largest_chains(&mut header.inclusion_paths, MAX_CHAINS, |v| v);
+    }
+}
+
+/// Marks every string id the analysis references.
+fn collect_used_strings(analysis: &AnalysisResult, used: &mut [bool]) {
+    let mark = |used: &mut [bool], id: StringId| {
+        if let Some(slot) = used.get_mut(id.index() as usize) {
+            *slot = true;
+        }
+    };
+    for (unit_id, unit) in &analysis.unit_analysis {
+        mark(used, *unit_id);
+        for header in unit.header_parse_duration.keys() {
+            mark(used, *header);
+        }
+        for (header, chains) in &unit.header_inclusion_paths {
+            mark(used, *header);
+            for chain in chains.keys() {
+                for part in chain {
+                    mark(used, *part);
+                }
+            }
+        }
+        for header in unit.header_usage.keys() {
+            mark(used, *header);
+        }
+        for template in unit.function_template_instantiations.keys() {
+            mark(used, *template);
+        }
+        for template in unit.class_template_instantiations.keys() {
+            mark(used, *template);
+        }
+    }
+    for (header, detail) in &analysis.header_analysis {
+        mark(used, *header);
+        for chain in detail.inclusion_paths.keys() {
+            for part in chain {
+                mark(used, *part);
+            }
+        }
+    }
+    for template in analysis.function_template_instantiations.keys() {
+        mark(used, *template);
+    }
+    for template in analysis.class_template_instantiations.keys() {
+        mark(used, *template);
+    }
+}
+
+/// Rewrites every string id with its value from `remap`.
+fn remap_analysis(analysis: &mut AnalysisResult, remap: &[u32]) {
+    let remap_id = |id: StringId| StringId::from(remap[id.index() as usize]);
+    let remap_map = |map: HashMap<StringId, TemplateInstantiation>| {
+        map.into_iter().map(|(k, v)| (remap_id(k), v)).collect()
+    };
+
+    let units = std::mem::take(&mut analysis.unit_analysis);
+    analysis.unit_analysis = units
+        .into_iter()
+        .map(|(unit_id, mut unit)| {
+            unit.header_parse_duration = unit
+                .header_parse_duration
+                .into_iter()
+                .map(|(k, v)| (remap_id(k), v))
+                .collect();
+            unit.header_inclusion_paths = unit
+                .header_inclusion_paths
+                .into_iter()
+                .map(|(header, chains)| {
+                    let chains = chains
+                        .into_iter()
+                        .map(|(chain, v)| (chain.into_iter().map(remap_id).collect(), v))
+                        .collect();
+                    (remap_id(header), chains)
+                })
+                .collect();
+            unit.header_usage = unit
+                .header_usage
+                .into_iter()
+                .map(|(k, v)| (remap_id(k), v))
+                .collect();
+            unit.function_template_instantiations =
+                remap_map(unit.function_template_instantiations);
+            unit.class_template_instantiations = remap_map(unit.class_template_instantiations);
+            (remap_id(unit_id), unit)
+        })
+        .collect();
+
+    let headers = std::mem::take(&mut analysis.header_analysis);
+    analysis.header_analysis = headers
+        .into_iter()
+        .map(|(header, mut detail)| {
+            detail.inclusion_paths = detail
+                .inclusion_paths
+                .into_iter()
+                .map(|(chain, v)| (chain.into_iter().map(remap_id).collect(), v))
+                .collect();
+            (remap_id(header), detail)
+        })
+        .collect();
+
+    analysis.function_template_instantiations =
+        remap_map(std::mem::take(&mut analysis.function_template_instantiations));
+    analysis.class_template_instantiations =
+        remap_map(std::mem::take(&mut analysis.class_template_instantiations));
 }
 
 /// Writes the report to the file at `path`.
@@ -284,6 +491,59 @@ mod tests {
             );
         }
         Report::new(strings, BuildInfo::default(), AnalysisResult::from(units))
+    }
+
+    #[test]
+    fn slim_prunes_data_and_keeps_ids_valid() {
+        // The string table must be sorted for `id_of`.
+        let mut strings: Vec<String> = (0..30).map(|i| format!("s{i:02}")).collect();
+        strings.sort();
+        let id_of = |s: &str| {
+            StringId::from(strings.binary_search_by(|x| x.as_str().cmp(s)).unwrap() as u32)
+        };
+
+        let mut unit = UnitAnalysis {
+            total_duration: 100,
+            frontend_duration: 0,
+            backend_duration: 0,
+            template_instantiation_duration: 0,
+            header_parse_duration: HashMap::new(),
+            header_inclusion_paths: BTreeMap::new(),
+            header_usage: HashMap::new(),
+            function_template_instantiations: HashMap::new(),
+            class_template_instantiations: HashMap::new(),
+        };
+        for i in 0..20 {
+            unit.header_parse_duration
+                .insert(id_of(&format!("s{i:02}")), i as i64);
+            unit.function_template_instantiations
+                .insert(id_of(&format!("s{i:02}")), TemplateInstantiation::new(i as i64));
+        }
+        let units = HashMap::from([(id_of("s00"), unit)]);
+        let mut report = Report::new(
+            strings.clone(),
+            BuildInfo::default(),
+            AnalysisResult::from(units),
+        );
+
+        report.slim(5, 3);
+
+        let unit = report.analysis.unit_analysis.values().next().unwrap();
+        assert_eq!(unit.header_parse_duration.len(), 5);
+        assert_eq!(unit.function_template_instantiations.len(), 5);
+        assert!(report.analysis.function_template_instantiations.len() <= 3);
+
+        // Every remaining id must resolve inside the string table.
+        for id in unit.header_parse_duration.keys() {
+            assert!(!report.resolve(*id).is_empty());
+        }
+
+        // The pruned report must still write and read back.
+        let path = std::env::temp_dir().join("slim_roundtrip.msgpack");
+        write_report(&report, &path).unwrap();
+        let read = read_report(&path).unwrap();
+        assert_eq!(read.analysis.unit_analysis.len(), 1);
+        std::fs::remove_file(path).ok();
     }
 
     #[test]

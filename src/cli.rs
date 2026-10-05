@@ -63,6 +63,15 @@ pub struct AnalyzeArgs {
     #[arg(long)]
     pub header_usage: bool,
 
+    /// Largest number of headers and templates kept for each translation unit.
+    /// Use 0 to keep all.
+    #[arg(long, default_value_t = 100)]
+    pub max_per_unit: usize,
+
+    /// Largest number of templates kept for the whole build. Use 0 to keep all.
+    #[arg(long, default_value_t = 5000)]
+    pub max_templates: usize,
+
     /// Disable the progress bar.
     #[arg(long)]
     pub no_progress: bool,

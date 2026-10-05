@@ -312,6 +312,7 @@ Check your Browserslist config to be sure that your targets are set up correctly
                 <button role="tab" data-tab="headers" class="tab-btn px-3 py-2 rounded-md text-sm font-medium text-gray-600 dark:text-gray-400" aria-selected="false">Headers</button>
                 <button role="tab" data-tab="templates" class="tab-btn px-3 py-2 rounded-md text-sm font-medium text-gray-600 dark:text-gray-400" aria-selected="false">Templates</button>
                 <button role="tab" data-tab="dirs" class="tab-btn px-3 py-2 rounded-md text-sm font-medium text-gray-600 dark:text-gray-400" aria-selected="false">Directories</button>
+                <button role="tab" data-tab="targets" class="tab-btn px-3 py-2 rounded-md text-sm font-medium text-gray-600 dark:text-gray-400" aria-selected="false">Targets</button>
                 <button role="tab" data-tab="graph" class="tab-btn px-3 py-2 rounded-md text-sm font-medium text-gray-600 dark:text-gray-400" aria-selected="false">Dependency graph</button>
             </nav>
             </div>
@@ -500,6 +501,43 @@ Check your Browserslist config to be sure that your targets are set up correctly
                     </table>
                     </div>
                 </div>
+            </div>
+
+            <!-- Targets tab -->
+            <div id="tab-targets" role="tabpanel" class="tab-panel hidden">
+                <div class="bg-white p-4 rounded-lg shadow dark:bg-gray-800">
+                    <h2 class="text-xl font-semibold mb-2">CMake target graph</h2>
+                    <p class="text-sm text-gray-500 mb-3 dark:text-gray-400">
+                        Link dependencies between CMake targets. A box sits above the libraries it needs.
+                        The filled part shows the compile time of the target's translation units.
+                    </p>
+                    <div class="flex flex-wrap items-center gap-3 mb-3 text-xs text-gray-500 dark:text-gray-400">
+                        <span class="flex items-center gap-1.5"><span class="inline-block w-3 h-3 rounded bg-blue-500"></span> executable</span>
+                        <span class="flex items-center gap-1.5"><span class="inline-block w-3 h-3 rounded bg-green-500"></span> static</span>
+                        <span class="flex items-center gap-1.5"><span class="inline-block w-3 h-3 rounded bg-violet-500"></span> shared</span>
+                        <span class="flex items-center gap-1.5"><span class="inline-block w-3 h-3 rounded bg-gray-400"></span> other</span>
+                    </div>
+                    <div class="flex flex-wrap items-center gap-4 mb-3 text-sm">
+                        <label class="flex items-center gap-2">
+                            <span class="text-gray-600 dark:text-gray-400">Max targets</span>
+                            <input type="range" id="targets-max" min="5" max="200" value="30" class="w-40 dark:bg-gray-800 dark:text-gray-100">
+                            <span class="font-medium" id="targets-max-label">30</span>
+                        </label>
+                        <label class="flex items-center gap-2 text-gray-600 dark:text-gray-400">
+                            <input type="checkbox" id="targets-reduce" checked> Remove redundant links
+                        </label>
+                        <label class="flex items-center gap-2 text-gray-600 dark:text-gray-400">
+                            <input type="checkbox" id="targets-interface"> Show interface libraries
+                        </label>
+                        <label class="flex items-center gap-2 text-gray-600 dark:text-gray-400 ml-auto">
+                            <input type="checkbox" id="targets-critical"> Highlight critical path
+                        </label>
+                    </div>
+                    <div id="targets-summary" class="text-sm text-gray-700 mb-3 dark:text-gray-300"></div>
+                    <div id="targets-empty" class="hidden text-gray-500 text-sm mb-2 dark:text-gray-400"></div>
+                    <svg id="targetGraph" width="100%" height="600" class="border border-gray-200 rounded dark:border-gray-700"></svg>
+                </div>
+                <div id="target-tooltip" class="hidden fixed bg-gray-900 text-white text-xs px-3 py-2 rounded shadow-lg pointer-events-none z-20 max-w-sm"></div>
             </div>
 
             <!-- Dependency graph tab -->
@@ -940,13 +978,18 @@ Check your Browserslist config to be sure that your targets are set up correctly
         function renderActiveTab() {
             switch (state.currentTab) {
                 case 'units':
-                    // The Units table is already drawn. Nothing else is needed.
+                    renderUnitsTable(state.sortedUnits);
+                    updateSortIndicators('units');
                     break;
                 case 'headers':
+                    renderHeadersTable(ensureSortedHeaders());
+                    updateSortIndicators('headers');
                     renderHeaderParetoChart();
                     renderSuggestions(state.headers);
                     break;
                 case 'templates':
+                    renderTemplatesTable(ensureSortedTemplates());
+                    updateSortIndicators('templates');
                     break;
                 case 'dirs':
                     buildDirRollup();
@@ -955,6 +998,9 @@ Check your Browserslist config to be sure that your targets are set up correctly
                     break;
                 case 'graph':
                     renderInclusionGraph();
+                    break;
+                case 'targets':
+                    renderTargetGraph();
                     break;
                 default: // The overview tab.
                     renderDurationChart(state.units);
@@ -990,6 +1036,29 @@ Check your Browserslist config to be sure that your targets are set up correctly
             if (inclusionSim) inclusionSim.alpha(1).restart();
         });
 
+        // Largest number of rows drawn in the unit and header tables. The
+        // filter narrows the list. This keeps a large report responsive.
+        const MAX_TABLE_ROWS = 1000;
+
+        // Builds the header list on first use.
+        function ensureSortedHeaders() {
+            if (!state.sortedHeaders) {
+                state.sortedHeaders = Object.entries(state.headers).sort((a, b) => b[1].parse_duration - a[1].parse_duration);
+            }
+            return state.sortedHeaders;
+        }
+
+        // Builds the template list on first use.
+        function ensureSortedTemplates() {
+            if (!state.sortedTemplates) {
+                state.sortedTemplates = [
+                    ...Object.entries(state.fnTemplates).map(([name, t]) => [name, t, 'function']),
+                    ...Object.entries(state.classTemplates).map(([name, t]) => [name, t, 'class']),
+                ].sort((a, b) => b[1].total_duration - a[1].total_duration);
+            }
+            return state.sortedTemplates;
+        }
+
         function render(report) {
             document.getElementById('empty-state').classList.add('hidden');
             document.getElementById('report-content').classList.remove('hidden');
@@ -1002,21 +1071,14 @@ Check your Browserslist config to be sure that your targets are set up correctly
             state.fnTemplates = report.analysis.function_template_instantiations || {};
             state.classTemplates = report.analysis.class_template_instantiations || {};
 
-            renderBuildConfig(report.build_info || {});
-
+            // The units list feeds the overview, so build it now. The header
+            // and template lists are large, so build them when their tab opens.
             state.sortedUnits = Object.entries(state.units).sort((a, b) => b[1].total_duration - a[1].total_duration);
-            state.sortedHeaders = Object.entries(state.headers).sort((a, b) => b[1].parse_duration - a[1].parse_duration);
-            state.sortedTemplates = [
-                ...Object.entries(state.fnTemplates).map(([name, t]) => [name, t, 'function']),
-                ...Object.entries(state.classTemplates).map(([name, t]) => [name, t, 'class']),
-            ].sort((a, b) => b[1].total_duration - a[1].total_duration);
+            state.sortedHeaders = null;
+            state.sortedTemplates = null;
 
+            renderBuildConfig(report.build_info || {});
             clearGraphFocus();
-
-            renderUnitsTable(state.sortedUnits);
-            renderHeadersTable(state.sortedHeaders);
-            renderTemplatesTable(state.sortedTemplates);
-
             Object.keys(sortState).forEach(updateSortIndicators);
 
             renderActiveTab();
@@ -1289,8 +1351,9 @@ Check your Browserslist config to be sure that your targets are set up correctly
 
         function renderUnitsTableBody() {
             const maxDuration = state.sortedUnits.reduce((m, [, u]) => Math.max(m, u.total_duration || 0), 0);
-            document.getElementById('table-body-longest-units').innerHTML = state.sortedUnits
-                .filter(([id]) => matchesFilter(id, "filter-units"))
+            const rows = state.sortedUnits.filter(([id]) => matchesFilter(id, "filter-units"));
+            const shown = rows.slice(0, MAX_TABLE_ROWS);
+            document.getElementById('table-body-longest-units').innerHTML = shown
                 .map(([id, u]) => {
                     const pct = maxDuration > 0 ? Math.max(1, Math.round((u.total_duration / maxDuration) * 100)) : 0;
                     return `
@@ -1299,7 +1362,14 @@ Check your Browserslist config to be sure that your targets are set up correctly
                     <td class="p-2">${durationBar(pct, fmtDuration(u.total_duration))}</td>
                     <td class="p-2">${unitSplitBar(u)}</td>
                 </tr>`;
-                }).join('');
+                }).join('') + moreRowsNote(rows.length - shown.length, 3);
+        }
+
+        // Returns a table row that states how many rows were not drawn.
+        function moreRowsNote(hidden, columns) {
+            if (hidden <= 0) return '';
+            return `<tr><td colspan="${columns}" class="p-2 text-xs text-gray-400 dark:text-gray-500">` +
+                `${hidden} more not shown. Narrow the filter or change the sort.</td></tr>`;
         }
 
         // Draws a small split bar for a unit. The colors match the overview
@@ -1325,8 +1395,9 @@ Check your Browserslist config to be sure that your targets are set up correctly
 
         function renderHeadersTableBody() {
             const maxDuration = state.sortedHeaders.reduce((m, [, h]) => Math.max(m, h.parse_duration || 0), 0);
-            document.getElementById('table-body-longest-headers').innerHTML = state.sortedHeaders
-                .filter(([id]) => matchesFilter(id, 'filter-headers'))
+            const rows = state.sortedHeaders.filter(([id]) => matchesFilter(id, 'filter-headers'));
+            const shown = rows.slice(0, MAX_TABLE_ROWS);
+            document.getElementById('table-body-longest-headers').innerHTML = shown
                 .map(([id, h]) => {
                 const header = s(id);
                 const paths = h.inclusion_paths instanceof Map
@@ -1353,7 +1424,7 @@ Check your Browserslist config to be sure that your targets are set up correctly
                     <td class="p-2">${usageShareBar(h)}</td>
                     <td class="p-2">${h.num_inclusions}</td>
                 </tr>`;
-            }).join('');
+            }).join('') + moreRowsNote(rows.length - shown.length, 5);
         }
 
         function durationBar(pct, text) {
@@ -1991,6 +2062,263 @@ Check your Browserslist config to be sure that your targets are set up correctly
                     if (labelSel) labelSel.attr('x', d => d.x + rScale(d.weight) + 4).attr('y', d => d.y + 4);
                 });
         }
+
+        // ---- CMake target dependency graph ----
+
+        /// Returns the fill color for a target kind.
+        function targetKindColor(kind) {
+            return {
+                executable: '#3b82f6',
+                static: '#10b981',
+                shared: '#8b5cf6',
+                object: '#6b7280',
+                interface: '#f59e0b',
+            }[kind] || '#9ca3af';
+        }
+
+        /// Draws the CMake target graph as a layered DAG. A target sits above
+        /// the libraries it needs. The filled part of a box shows the compile
+        /// time of the target's translation units.
+        // Removes redundant links from a DAG. A link from->to is redundant when
+        // the target is reachable from another direct dependency of the source.
+        function reduceLinks(nodes, edges) {
+            const adj = new Map(nodes.map(n => [n, []]));
+            for (const e of edges) adj.get(e.from).push(e.to);
+            const memo = new Map();
+            const reachable = (name) => {
+                if (memo.has(name)) return memo.get(name);
+                const set = new Set();
+                memo.set(name, set);
+                for (const dep of adj.get(name) || []) {
+                    set.add(dep);
+                    for (const next of reachable(dep)) set.add(next);
+                }
+                return set;
+            };
+            return edges.filter(e => {
+                for (const other of adj.get(e.from) || []) {
+                    if (other !== e.to && reachable(other).has(e.to)) return false;
+                }
+                return true;
+            });
+        }
+
+        function renderTargetGraph() {
+            const svgEl = document.getElementById('targetGraph');
+            if (!svgEl) return;
+            const emptyEl = document.getElementById('targets-empty');
+            const summaryEl = document.getElementById('targets-summary');
+            const graph = reportData && reportData.analysis && reportData.analysis.targets;
+            let targets = (graph && graph.targets) || [];
+
+            if (!targets.length) {
+                summaryEl.textContent = '';
+                emptyEl.textContent = 'No target data. The build directory needs a CMake File API reply or a build.ninja file.';
+                emptyEl.classList.remove('hidden');
+                d3.select(svgEl).selectAll('*').remove();
+                return;
+            }
+            emptyEl.classList.add('hidden');
+
+            // Interface libraries have no compile time. Hide them by default.
+            if (!document.getElementById('targets-interface').checked) {
+                targets = targets.filter(t => t.kind !== 'interface');
+            }
+            const totalTargets = targets.length;
+            if (!totalTargets) {
+                summaryEl.textContent = '';
+                emptyEl.textContent = 'No non-interface targets. Enable "Show interface libraries" to see them.';
+                emptyEl.classList.remove('hidden');
+                d3.select(svgEl).selectAll('*').remove();
+                return;
+            }
+
+            const byName = new Map(targets.map(t => [t.name, t]));
+            const names = new Set(byName.keys());
+            let edges = (graph.edges || []).filter(e => names.has(e.from) && names.has(e.to));
+
+            // A dependency sits one layer below its dependent.
+            const depsOf = new Map(targets.map(t => [t.name, []]));
+            for (const e of edges) depsOf.get(e.from).push(e.to);
+
+            // The critical path is the dependency chain with the most time.
+            const longest = new Map();
+            const nextOnPath = new Map();
+            const computeLongest = (name, stack) => {
+                if (longest.has(name)) return longest.get(name);
+                if (stack.has(name)) return 0;
+                stack.add(name);
+                let bestDep = null;
+                let bestValue = -1;
+                for (const dep of depsOf.get(name) || []) {
+                    const value = computeLongest(dep, stack);
+                    if (value > bestValue) {
+                        bestValue = value;
+                        bestDep = dep;
+                    }
+                }
+                stack.delete(name);
+                const target = byName.get(name);
+                const total = (target ? target.duration || 0 : 0) + Math.max(0, bestValue);
+                longest.set(name, total);
+                nextOnPath.set(name, bestDep);
+                return total;
+            };
+            for (const t of targets) computeLongest(t.name, new Set());
+
+            let root = targets[0].name;
+            let rootValue = -1;
+            for (const t of targets) {
+                const value = longest.get(t.name);
+                if (value > rootValue) {
+                    rootValue = value;
+                    root = t.name;
+                }
+            }
+            const criticalNodes = new Set();
+            const criticalEdges = new Set();
+            for (let name = root; name; name = nextOnPath.get(name)) {
+                criticalNodes.add(name);
+                const dep = nextOnPath.get(name);
+                if (dep) criticalEdges.add(name + '\u0000' + dep);
+            }
+
+            // Keep the heaviest targets, and always the critical path.
+            const maxTargets = parseInt(document.getElementById('targets-max').value, 10) || 30;
+            const chosen = new Set(criticalNodes);
+            if (targets.length > maxTargets) {
+                const ranked = [...targets].sort((a, b) => (b.duration || 0) - (a.duration || 0));
+                for (const t of ranked) {
+                    if (chosen.size >= maxTargets) break;
+                    chosen.add(t.name);
+                }
+            }
+            const kept = targets.filter(t => chosen.has(t.name));
+            const keptNames = new Set(kept.map(t => t.name));
+            edges = edges.filter(e => keptNames.has(e.from) && keptNames.has(e.to));
+
+            // Remove links that a longer path already covers.
+            if (document.getElementById('targets-reduce').checked) {
+                edges = reduceLinks([...keptNames], edges);
+            }
+
+            const keptDeps = new Map(kept.map(t => [t.name, []]));
+            for (const e of edges) keptDeps.get(e.from).push(e.to);
+            const layer = new Map();
+            const resolveLayer = (name, stack) => {
+                if (layer.has(name)) return layer.get(name);
+                if (stack.has(name)) return 0;
+                stack.add(name);
+                let result = 0;
+                for (const dep of keptDeps.get(name) || []) {
+                    result = Math.max(result, resolveLayer(dep, stack) + 1);
+                }
+                stack.delete(name);
+                layer.set(name, result);
+                return result;
+            };
+            for (const t of kept) resolveLayer(t.name, new Set());
+
+            const maxLayer = Math.max(0, ...kept.map(t => layer.get(t.name)));
+            const maxDuration = Math.max(...kept.map(t => t.duration || 0), 1);
+            const showCritical = document.getElementById('targets-critical').checked;
+
+            // Place the nodes. Layer 0 (no dependencies) is at the bottom.
+            const groups = Array.from({ length: maxLayer + 1 }, () => []);
+            for (const t of kept) groups[layer.get(t.name)].push(t);
+            for (const group of groups) group.sort((a, b) => (b.duration || 0) - (a.duration || 0));
+
+            const width = svgEl.clientWidth || 900;
+            const height = svgEl.clientHeight || 600;
+            const nodeHeight = 26;
+            const layerGap = Math.min(120, (height - 80) / Math.max(1, maxLayer + 1));
+            const positions = new Map();
+            groups.forEach((group, index) => {
+                const y = height - 40 - index * layerGap;
+                group.forEach((t, i) => {
+                    const x = ((i + 1) / (group.length + 1)) * width;
+                    positions.set(t.name, { x, y });
+                });
+            });
+
+            const svg = d3.select(svgEl);
+            svg.selectAll('*').remove();
+            const canvas = svg.append('g');
+            const zoom = d3.zoom().scaleExtent([0.2, 4]).on('zoom', (event) => canvas.attr('transform', event.transform));
+            svg.call(zoom);
+
+            svg.append('defs').append('marker')
+                .attr('id', 'target-arrow').attr('viewBox', '0 -5 10 10')
+                .attr('refX', 10).attr('refY', 0)
+                .attr('markerWidth', 6).attr('markerHeight', 6).attr('orient', 'auto')
+                .append('path').attr('d', 'M0,-5L10,0L0,5').attr('fill', '#94a3b8');
+
+            const isCriticalEdge = (e) => showCritical && criticalEdges.has(e.from + '\u0000' + e.to);
+            canvas.append('g').selectAll('path').data(edges).join('path')
+                .attr('d', (e) => {
+                    const a = positions.get(e.from);
+                    const b = positions.get(e.to);
+                    if (!a || !b) return null;
+                    const ay = a.y + (a.y > b.y ? nodeHeight / 2 : -nodeHeight / 2);
+                    const by = b.y + (b.y > a.y ? -nodeHeight / 2 : nodeHeight / 2);
+                    const mid = (ay + by) / 2;
+                    return `M${a.x},${ay} C${a.x},${mid} ${b.x},${mid} ${b.x},${by}`;
+                })
+                .attr('fill', 'none')
+                .attr('stroke', (e) => isCriticalEdge(e) ? '#ef4444' : '#94a3b8')
+                .attr('stroke-width', (e) => isCriticalEdge(e) ? 2.5 : 1.2)
+                .attr('stroke-opacity', 0.7)
+                .attr('marker-end', 'url(#target-arrow)');
+
+            const barWidth = 150;
+            const node = canvas.append('g').selectAll('g').data(kept).join('g')
+                .attr('transform', (t) => {
+                    const p = positions.get(t.name);
+                    return `translate(${p.x},${p.y})`;
+                })
+                .style('cursor', 'pointer');
+
+            node.append('rect')
+                .attr('x', -barWidth / 2).attr('y', -nodeHeight / 2)
+                .attr('width', barWidth).attr('height', nodeHeight).attr('rx', 6)
+                .attr('fill', '#ffffff').attr('stroke', (t) => targetKindColor(t.kind))
+                .attr('stroke-width', (t) => (showCritical && criticalNodes.has(t.name)) ? 3 : 1.5);
+
+            node.append('rect')
+                .attr('x', -barWidth / 2).attr('y', -nodeHeight / 2).attr('height', nodeHeight)
+                .attr('width', (t) => (barWidth * (t.duration || 0)) / maxDuration)
+                .attr('rx', 6).attr('fill', (t) => targetKindColor(t.kind)).attr('fill-opacity', 0.28);
+
+            node.append('text').attr('text-anchor', 'middle').attr('dy', '0.32em')
+                .attr('font-size', 11).attr('fill', isDark() ? '#e5e7eb' : '#111827')
+                .text((t) => t.name);
+
+            const tooltip = document.getElementById('target-tooltip');
+            node.on('mousemove', (event, t) => {
+                tooltip.innerHTML =
+                    `<div class="font-medium break-all">${esc(t.name)}</div>` +
+                    `<div>${t.kind} &middot; ${fmtDuration(t.duration)} &middot; ` +
+                    `${t.source_count} unit${t.source_count === 1 ? '' : 's'}</div>` +
+                    `<div>Critical path total: ${fmtDuration(longest.get(t.name))}</div>`;
+                tooltip.style.left = (event.pageX + 14) + 'px';
+                tooltip.style.top = (event.pageY + 14) + 'px';
+                tooltip.classList.remove('hidden');
+            }).on('mouseleave', () => tooltip.classList.add('hidden'));
+
+            const note = kept.length < totalTargets ? ` (showing the heaviest ${kept.length})` : '';
+            summaryEl.innerHTML =
+                `${kept.length} of ${totalTargets} targets${note} &middot; ${edges.length} links. ` +
+                `Critical path: <span class="font-medium">${fmtDuration(rootValue)}</span> ` +
+                `through <span class="font-medium">${esc(root)}</span>.`;
+        }
+
+        document.getElementById('targets-max').addEventListener('input', (e) => {
+            document.getElementById('targets-max-label').textContent = e.target.value;
+            renderTargetGraph();
+        });
+        ['targets-reduce', 'targets-interface', 'targets-critical'].forEach(id => {
+            document.getElementById(id).addEventListener('change', renderTargetGraph);
+        });
 
         // The shared detail-page building blocks. They give every detail page
         // the same layout: a KPI strip, a section wrapper, and a list table.

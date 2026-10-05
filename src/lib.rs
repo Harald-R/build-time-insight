@@ -13,3 +13,4 @@ pub mod header_usage;
 pub mod interner;
 pub mod raw_trace;
 pub mod report;
+pub mod targets;

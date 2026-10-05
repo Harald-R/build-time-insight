@@ -45,7 +45,7 @@ fn contains_traces(dir: &Path) -> bool {
     !build_traces::glob_trace_paths(dir.to_str().unwrap_or(""), &[]).is_empty()
 }
 
-fn resolve<'a>(strings: &'a [String], id: StringId) -> &'a str {
+fn resolve(strings: &[String], id: StringId) -> &str {
     id.resolve(strings)
 }
 
@@ -223,35 +223,35 @@ fn assert_header_usage(strings: &[String], result: &AnalysisResult) {
         };
 
         // edge_unused.cpp includes unused.h but uses nothing from it.
-        if name.ends_with("/edge_unused.cpp") {
-            if let Some(usage) = usage_of("include/unused.h") {
-                assert_eq!(
-                    usage,
-                    &HeaderUsage::Unused,
-                    "unused.h in edge_unused.cpp expected Unused, got {usage:?}"
-                );
-            }
+        if name.ends_with("/edge_unused.cpp")
+            && let Some(usage) = usage_of("include/unused.h")
+        {
+            assert_eq!(
+                usage,
+                &HeaderUsage::Unused,
+                "unused.h in edge_unused.cpp expected Unused, got {usage:?}"
+            );
         }
         // edge_needs.cpp constructs Widget, so fwd_class.h needs its definition.
-        if name.ends_with("/edge_needs.cpp") {
-            if let Some(usage) = usage_of("include/fwd_class.h") {
-                assert_eq!(
-                    usage,
-                    &HeaderUsage::NeedsDefinition,
-                    "fwd_class.h in edge_needs.cpp expected NeedsDefinition, got {usage:?}"
-                );
-            }
+        if name.ends_with("/edge_needs.cpp")
+            && let Some(usage) = usage_of("include/fwd_class.h")
+        {
+            assert_eq!(
+                usage,
+                &HeaderUsage::NeedsDefinition,
+                "fwd_class.h in edge_needs.cpp expected NeedsDefinition, got {usage:?}"
+            );
         }
         // vector3.h is a class template instantiated in the units that build
         // Vector3<double>: those must require its definition.
-        if name.ends_with("/main.cpp") {
-            if let Some(usage) = usage_of("include/vector3.h") {
-                assert_eq!(
-                    usage,
-                    &HeaderUsage::NeedsDefinition,
-                    "vector3.h in main.cpp expected NeedsDefinition, got {usage:?}"
-                );
-            }
+        if name.ends_with("/main.cpp")
+            && let Some(usage) = usage_of("include/vector3.h")
+        {
+            assert_eq!(
+                usage,
+                &HeaderUsage::NeedsDefinition,
+                "vector3.h in main.cpp expected NeedsDefinition, got {usage:?}"
+            );
         }
     }
 }
@@ -321,4 +321,40 @@ fn fixture_header_usage_is_classified_correctly() {
     );
     let analysis = analyzer::analyze_build_dir(dir.to_str().unwrap(), 4, &[], true, false);
     assert_header_usage(&analysis.strings, &analysis.result);
+}
+
+#[test]
+fn fixture_target_graph_is_correct() {
+    let dirs = fixture_build_dirs();
+    let Some(dir) = dirs.first() else {
+        eprintln!("SKIP: no fixture build dirs found");
+        return;
+    };
+    let analysis = analyzer::analyze_build_dir(dir.to_str().unwrap(), 4, &[], false, false);
+    let Some(graph) = &analysis.result.targets else {
+        eprintln!("SKIP: no CMake target data in the fixture build dir");
+        return;
+    };
+
+    let names: Vec<&str> = graph.targets.iter().map(|t| t.name.as_str()).collect();
+    assert!(names.contains(&"geometry_lib"), "targets: {names:?}");
+    assert!(names.contains(&"shapely"), "targets: {names:?}");
+    assert!(
+        graph
+            .edges
+            .iter()
+            .any(|e| e.from == "shapely" && e.to == "geometry_lib"),
+        "expected a shapely -> geometry_lib edge, got: {:?}",
+        graph.edges.iter().map(|e| format!("{}->{}", e.from, e.to)).collect::<Vec<_>>()
+    );
+    // A target with sources must have a positive compile time.
+    for target in &graph.targets {
+        if target.source_count > 0 {
+            assert!(
+                target.duration > 0,
+                "target '{}' has sources but no duration",
+                target.name
+            );
+        }
+    }
 }

@@ -173,7 +173,8 @@ fn run_analyze(args: &cli::AnalyzeArgs, quiet: bool) -> anyhow::Result<()> {
         }
     }
 
-    let report = Report::new(analysis.strings, build_info, analysis.result);
+    let mut report = Report::new(analysis.strings, build_info, analysis.result);
+    report.slim(args.max_per_unit, args.max_templates);
     let path = args
         .output
         .clone()

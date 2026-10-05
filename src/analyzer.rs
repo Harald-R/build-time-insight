@@ -156,6 +156,9 @@ pub struct AnalysisResult {
     /// Duration and count per class template instantiation.
     #[serde(serialize_with = "crate::report::serialize_sorted_map")]
     pub class_template_instantiations: HashMap<StringId, TemplateInstantiation>,
+    /// CMake target dependency graph, when target data is available.
+    #[serde(default)]
+    pub targets: Option<crate::targets::TargetGraph>,
 }
 
 impl AnalysisResult {
@@ -169,6 +172,7 @@ impl AnalysisResult {
             header_analysis,
             function_template_instantiations,
             class_template_instantiations,
+            targets: None,
         }
     }
 
@@ -653,7 +657,21 @@ pub fn analyze_build_dir(
     if let Some(bar) = &bar {
         bar.finish_and_clear();
     }
-    finalize(&interner, root, AnalysisResult::from(unit_analysis))
+    let mut analysis = finalize(&interner, root, AnalysisResult::from(unit_analysis));
+
+    // Build the CMake target graph. The durations map holds each unit's total
+    // time, keyed by absolute source path.
+    let mut durations: HashMap<String, i64> = HashMap::new();
+    for (unit_id, unit) in &analysis.result.unit_analysis {
+        let source = analysis.resolve(*unit_id);
+        let absolute = match &analysis.root {
+            Some(root) => format!("{}/{}", root, source),
+            None => source.to_string(),
+        };
+        durations.insert(absolute, unit.total_duration);
+    }
+    analysis.result.targets = crate::targets::build(build_dir, &durations);
+    analysis
 }
 
 /// Sort the string table and remap every id so that identical inputs produce
@@ -743,6 +761,7 @@ fn finalize(interner: &Mutex<Interner>, root: Option<String>, result: AnalysisRe
             header_analysis,
             function_template_instantiations,
             class_template_instantiations,
+            targets: None,
         },
     }
 }
@@ -882,6 +901,7 @@ mod tests {
             header_analysis: HashMap::new(),
             function_template_instantiations: HashMap::new(),
             class_template_instantiations: HashMap::new(),
+            targets: None,
         };
         for (name, dur) in function_instantiations {
             result
@@ -1131,6 +1151,7 @@ mod tests {
             header_analysis: HashMap::new(),
             function_template_instantiations: HashMap::new(),
             class_template_instantiations: HashMap::new(),
+            targets: None,
         };
         let mut top: Vec<_> = result.longest_unit_compilations(2).collect();
         top.sort_by_key(|x| std::cmp::Reverse(x.1.total_duration));
@@ -1156,6 +1177,7 @@ mod tests {
             ]),
             function_template_instantiations: HashMap::new(),
             class_template_instantiations: HashMap::new(),
+            targets: None,
         };
         let mut top: Vec<_> = result.longest_headers_parse_duration(2).collect();
         top.sort_by_key(|x| std::cmp::Reverse(x.1.parse_duration));
