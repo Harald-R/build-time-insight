@@ -312,7 +312,7 @@ Check your Browserslist config to be sure that your targets are set up correctly
                 <button role="tab" data-tab="headers" class="tab-btn px-3 py-2 rounded-md text-sm font-medium text-gray-600 dark:text-gray-400" aria-selected="false">Headers</button>
                 <button role="tab" data-tab="templates" class="tab-btn px-3 py-2 rounded-md text-sm font-medium text-gray-600 dark:text-gray-400" aria-selected="false">Templates</button>
                 <button role="tab" data-tab="dirs" class="tab-btn px-3 py-2 rounded-md text-sm font-medium text-gray-600 dark:text-gray-400" aria-selected="false">Directories</button>
-                <button role="tab" data-tab="targets" class="tab-btn px-3 py-2 rounded-md text-sm font-medium text-gray-600 dark:text-gray-400" aria-selected="false">Targets</button>
+                <button role="tab" data-tab="targets" class="tab-btn px-3 py-2 rounded-md text-sm font-medium text-gray-600 dark:text-gray-400" aria-selected="false">Build Targets</button>
                 <button role="tab" data-tab="graph" class="tab-btn px-3 py-2 rounded-md text-sm font-medium text-gray-600 dark:text-gray-400" aria-selected="false">Dependency graph</button>
             </nav>
             </div>
@@ -506,10 +506,11 @@ Check your Browserslist config to be sure that your targets are set up correctly
             <!-- Targets tab -->
             <div id="tab-targets" role="tabpanel" class="tab-panel hidden">
                 <div class="bg-white p-4 rounded-lg shadow dark:bg-gray-800">
-                    <h2 class="text-xl font-semibold mb-2">CMake target graph</h2>
+                    <h2 class="text-xl font-semibold mb-2">Targets &amp; architecture</h2>
                     <p class="text-sm text-gray-500 mb-3 dark:text-gray-400">
-                        Link dependencies between CMake targets. A box sits above the libraries it needs.
-                        The filled part shows the compile time of the target's translation units.
+                        Link dependencies between CMake targets, the build-time flame graph, and advice from
+                        aggregating the targets into modules. A box sits above the libraries it needs, and the
+                        filled part shows the compile time of the target's translation units.
                     </p>
                     <div class="flex flex-wrap items-center gap-3 mb-3 text-xs text-gray-500 dark:text-gray-400">
                         <span class="flex items-center gap-1.5"><span class="inline-block w-3 h-3 rounded bg-blue-500"></span> executable</span>
@@ -517,11 +518,28 @@ Check your Browserslist config to be sure that your targets are set up correctly
                         <span class="flex items-center gap-1.5"><span class="inline-block w-3 h-3 rounded bg-violet-500"></span> shared</span>
                         <span class="flex items-center gap-1.5"><span class="inline-block w-3 h-3 rounded bg-gray-400"></span> other</span>
                     </div>
+                    <div id="targets-kpis" class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-2 mb-3"></div>
+                    <div id="targets-views" role="group" aria-label="Target views" class="inline-flex rounded-md border border-gray-200 dark:border-gray-700 mb-3 overflow-hidden text-sm">
+                        <button type="button" data-view="graph" class="targets-view-btn px-3 py-1.5 font-medium">Graph</button>
+                        <button type="button" data-view="flame" class="targets-view-btn px-3 py-1.5 font-medium">Flame</button>
+                        <button type="button" data-view="suggestions" class="targets-view-btn px-3 py-1.5 font-medium">Suggestions</button>
+                    </div>
                     <div class="flex flex-wrap items-center gap-4 mb-3 text-sm">
                         <label class="flex items-center gap-2">
                             <span class="text-gray-600 dark:text-gray-400">Max targets</span>
                             <input type="range" id="targets-max" min="5" max="200" value="30" class="w-40 dark:bg-gray-800 dark:text-gray-100">
                             <span class="font-medium" id="targets-max-label">30</span>
+                        </label>
+                        <label class="flex items-center gap-2 text-gray-600 dark:text-gray-400">
+                            <span>Node size</span>
+                            <select id="targets-metric" class="border rounded p-1 text-sm dark:border-gray-700 dark:bg-gray-800 dark:text-gray-100">
+                                <option value="own">Own time</option>
+                                <option value="subtree">Subtree time</option>
+                                <option value="fanin">Fan-in</option>
+                            </select>
+                        </label>
+                        <label class="flex items-center gap-2 text-gray-600 dark:text-gray-400" title="Group the graph nodes by directory">
+                            <input type="checkbox" id="targets-group"> Group by directory
                         </label>
                         <label class="flex items-center gap-2 text-gray-600 dark:text-gray-400">
                             <input type="checkbox" id="targets-reduce" checked> Remove redundant links
@@ -533,11 +551,33 @@ Check your Browserslist config to be sure that your targets are set up correctly
                             <input type="checkbox" id="targets-critical"> Highlight critical path
                         </label>
                     </div>
-                    <div id="targets-summary" class="text-sm text-gray-700 mb-3 dark:text-gray-300"></div>
-                    <div id="targets-empty" class="hidden text-gray-500 text-sm mb-2 dark:text-gray-400"></div>
-                    <svg id="targetGraph" width="100%" height="600" class="border border-gray-200 rounded dark:border-gray-700"></svg>
+
+                    <!-- Graph view -->
+                    <div id="targets-view-graph">
+                        <div id="targets-summary" class="text-sm text-gray-700 mb-3 dark:text-gray-300"></div>
+                        <div id="targets-empty" class="hidden text-gray-500 text-sm mb-2 dark:text-gray-400"></div>
+                        <svg id="targetGraph" width="100%" height="600" class="border border-gray-200 rounded dark:border-gray-700"></svg>
+                        <div id="targets-critical-path" class="mt-4 text-sm"></div>
+                    </div>
+
+                    <!-- Flame view -->
+                    <div id="targets-view-flame" class="hidden">
+                        <div class="flex flex-wrap items-center gap-3 mb-3 text-sm">
+                            <button id="flame-reset" class="bg-blue-500 text-white px-3 py-1 rounded text-xs">Reset zoom</button>
+                            <div id="flame-breadcrumb" class="text-gray-600 dark:text-gray-400"></div>
+                        </div>
+                        <div id="flame-empty" class="hidden text-gray-500 text-sm mb-2 dark:text-gray-400"></div>
+                        <svg id="flameGraph" width="100%" height="240" class="border border-gray-200 rounded dark:border-gray-700"></svg>
+                    </div>
+
+                    <!-- Suggestions view -->
+                    <div id="targets-view-suggestions" class="hidden">
+                        <div id="arch-summary" class="text-sm text-gray-700 mb-3 dark:text-gray-300"></div>
+                        <div id="arch-suggestions" class="space-y-2 max-h-[60vh] overflow-y-auto pr-1"></div>
+                    </div>
                 </div>
                 <div id="target-tooltip" class="hidden fixed bg-gray-900 text-white text-xs px-3 py-2 rounded shadow-lg pointer-events-none z-20 max-w-sm"></div>
+                <div id="flame-tooltip" class="hidden fixed bg-gray-900 text-white text-xs px-3 py-2 rounded shadow-lg pointer-events-none z-20 max-w-sm"></div>
             </div>
 
             <!-- Dependency graph tab -->
@@ -946,6 +986,7 @@ Check your Browserslist config to be sure that your targets are set up correctly
         // inside a hidden panel has no size, so it is drawn when shown.
         function activateTab(name, updateHash = true) {
             if (updateHash) setHash('#' + name);
+            if (!document.getElementById('tab-' + name)) name = 'overview';
             state.currentTab = name;
             document.querySelectorAll('.tab-btn').forEach(b => {
                 const active = b.dataset.tab === name;
@@ -1000,7 +1041,7 @@ Check your Browserslist config to be sure that your targets are set up correctly
                     renderInclusionGraph();
                     break;
                 case 'targets':
-                    renderTargetGraph();
+                    renderTargetsTab();
                     break;
                 default: // The overview tab.
                     renderDurationChart(state.units);
@@ -1064,6 +1105,9 @@ Check your Browserslist config to be sure that your targets are set up correctly
             document.getElementById('report-content').classList.remove('hidden');
             dirState.dirs = [];
             dirState.expanded.clear();
+            flameRoot = null;
+            flameFocus = null;
+            state.targetsView = 'graph';
 
             strings = report.strings || [];
             state.units = report.analysis.unit_analysis || {};
@@ -2103,11 +2147,46 @@ Check your Browserslist config to be sure that your targets are set up correctly
             });
         }
 
+        // Returns the module key for a target: the first two parts of its
+        // directory. A target without a directory goes to "(root)".
+        function targetModule(target) {
+            if (!target.dir) return '(root)';
+            const parts = target.dir.split('/').filter(Boolean);
+            return parts.slice(0, 2).join('/') || '(root)';
+        }
+
+        // Collapses targets into one node per module.
+        function groupByModule(targets, edges) {
+            const modules = new Map();
+            const moduleOf = new Map();
+            for (const t of targets) {
+                const key = targetModule(t);
+                moduleOf.set(t.name, key);
+                const module = modules.get(key) || { name: key, kind: 'module', dir: key, duration: 0, source_count: 0 };
+                module.duration += t.duration || 0;
+                module.source_count += t.source_count || 0;
+                modules.set(key, module);
+            }
+            const links = new Set();
+            for (const e of edges) {
+                const a = moduleOf.get(e.from);
+                const b = moduleOf.get(e.to);
+                if (a && b && a !== b) links.add(a + '\u0000' + b);
+            }
+            const moduleEdges = [...links].map(k => {
+                const i = k.indexOf('\u0000');
+                return { from: k.slice(0, i), to: k.slice(i + 1) };
+            });
+            return { targets: [...modules.values()], edges: moduleEdges };
+        }
+
         function renderTargetGraph() {
             const svgEl = document.getElementById('targetGraph');
             if (!svgEl) return;
             const emptyEl = document.getElementById('targets-empty');
             const summaryEl = document.getElementById('targets-summary');
+            const critEl = document.getElementById('targets-critical-path');
+            critEl.innerHTML = '';
             const graph = reportData && reportData.analysis && reportData.analysis.targets;
             let targets = (graph && graph.targets) || [];
 
@@ -2118,13 +2197,12 @@ Check your Browserslist config to be sure that your targets are set up correctly
                 d3.select(svgEl).selectAll('*').remove();
                 return;
             }
-            emptyEl.classList.add('hidden');
 
             // Interface libraries have no compile time. Hide them by default.
             if (!document.getElementById('targets-interface').checked) {
                 targets = targets.filter(t => t.kind !== 'interface');
             }
-            const totalTargets = targets.length;
+            let totalTargets = targets.length;
             if (!totalTargets) {
                 summaryEl.textContent = '';
                 emptyEl.textContent = 'No non-interface targets. Enable "Show interface libraries" to see them.';
@@ -2132,14 +2210,30 @@ Check your Browserslist config to be sure that your targets are set up correctly
                 d3.select(svgEl).selectAll('*').remove();
                 return;
             }
+            emptyEl.classList.add('hidden');
 
-            const byName = new Map(targets.map(t => [t.name, t]));
-            const names = new Set(byName.keys());
+            let byName = new Map(targets.map(t => [t.name, t]));
+            let names = new Set(byName.keys());
             let edges = (graph.edges || []).filter(e => names.has(e.from) && names.has(e.to));
+
+            // Collapse to module nodes when asked.
+            const grouped = document.getElementById('targets-group').checked;
+            if (grouped) {
+                ({ targets, edges } = groupByModule(targets, edges));
+                byName = new Map(targets.map(t => [t.name, t]));
+                totalTargets = targets.length;
+            }
 
             // A dependency sits one layer below its dependent.
             const depsOf = new Map(targets.map(t => [t.name, []]));
-            for (const e of edges) depsOf.get(e.from).push(e.to);
+            const fanIn = new Map(targets.map(t => [t.name, 0]));
+            for (const e of edges) {
+                if (depsOf.has(e.from) && fanIn.has(e.to)) {
+                    depsOf.get(e.from).push(e.to);
+                    fanIn.set(e.to, fanIn.get(e.to) + 1);
+                }
+            }
+            const own = new Map(targets.map(t => [t.name, t.duration || 0]));
 
             // The critical path is the dependency chain with the most time.
             const longest = new Map();
@@ -2158,8 +2252,7 @@ Check your Browserslist config to be sure that your targets are set up correctly
                     }
                 }
                 stack.delete(name);
-                const target = byName.get(name);
-                const total = (target ? target.duration || 0 : 0) + Math.max(0, bestValue);
+                const total = (own.get(name) || 0) + Math.max(0, bestValue);
                 longest.set(name, total);
                 nextOnPath.set(name, bestDep);
                 return total;
@@ -2177,13 +2270,51 @@ Check your Browserslist config to be sure that your targets are set up correctly
             }
             const criticalNodes = new Set();
             const criticalEdges = new Set();
-            for (let name = root; name; name = nextOnPath.get(name)) {
+            const criticalChain = [];
+            const walked = new Set();
+            for (let name = root; name && !walked.has(name); name = nextOnPath.get(name)) {
+                walked.add(name);
                 criticalNodes.add(name);
+                criticalChain.push(name);
                 const dep = nextOnPath.get(name);
                 if (dep) criticalEdges.add(name + '\u0000' + dep);
             }
 
-            // Keep the heaviest targets, and always the critical path.
+            // Subtree time is the own time of the target and of every target it
+            // reaches through its dependencies.
+            const descCache = new Map();
+            const descendants = (name, stack) => {
+                if (descCache.has(name)) return descCache.get(name);
+                const set = new Set();
+                descCache.set(name, set);
+                if (!stack.has(name)) {
+                    stack.add(name);
+                    for (const dep of depsOf.get(name) || []) {
+                        set.add(dep);
+                        for (const next of descendants(dep, stack)) set.add(next);
+                    }
+                    stack.delete(name);
+                }
+                return set;
+            };
+            const subtree = new Map();
+            const computeSubtree = (name) => {
+                if (!subtree.has(name)) {
+                    let total = own.get(name) || 0;
+                    for (const dep of descendants(name, new Set())) total += own.get(dep) || 0;
+                    subtree.set(name, total);
+                }
+                return subtree.get(name);
+            };
+
+            const metric = document.getElementById('targets-metric').value;
+            const metricOf = (name) => metric === 'subtree'
+                ? computeSubtree(name)
+                : metric === 'fanin'
+                    ? (fanIn.get(name) || 0)
+                    : (own.get(name) || 0);
+
+            // Keep the heaviest targets by own time, plus the critical path.
             const maxTargets = parseInt(document.getElementById('targets-max').value, 10) || 30;
             const chosen = new Set(criticalNodes);
             if (targets.length > maxTargets) {
@@ -2220,13 +2351,13 @@ Check your Browserslist config to be sure that your targets are set up correctly
             for (const t of kept) resolveLayer(t.name, new Set());
 
             const maxLayer = Math.max(0, ...kept.map(t => layer.get(t.name)));
-            const maxDuration = Math.max(...kept.map(t => t.duration || 0), 1);
+            const maxMetric = Math.max(1, ...kept.map(t => metricOf(t.name)));
             const showCritical = document.getElementById('targets-critical').checked;
 
             // Place the nodes. Layer 0 (no dependencies) is at the bottom.
             const groups = Array.from({ length: maxLayer + 1 }, () => []);
             for (const t of kept) groups[layer.get(t.name)].push(t);
-            for (const group of groups) group.sort((a, b) => (b.duration || 0) - (a.duration || 0));
+            for (const group of groups) group.sort((a, b) => metricOf(b.name) - metricOf(a.name));
 
             const width = svgEl.clientWidth || 900;
             const height = svgEl.clientHeight || 600;
@@ -2236,8 +2367,7 @@ Check your Browserslist config to be sure that your targets are set up correctly
             groups.forEach((group, index) => {
                 const y = height - 40 - index * layerGap;
                 group.forEach((t, i) => {
-                    const x = ((i + 1) / (group.length + 1)) * width;
-                    positions.set(t.name, { x, y });
+                    positions.set(t.name, { x: ((i + 1) / (group.length + 1)) * width, y });
                 });
             });
 
@@ -2286,7 +2416,7 @@ Check your Browserslist config to be sure that your targets are set up correctly
 
             node.append('rect')
                 .attr('x', -barWidth / 2).attr('y', -nodeHeight / 2).attr('height', nodeHeight)
-                .attr('width', (t) => (barWidth * (t.duration || 0)) / maxDuration)
+                .attr('width', (t) => (barWidth * metricOf(t.name)) / maxMetric)
                 .attr('rx', 6).attr('fill', (t) => targetKindColor(t.kind)).attr('fill-opacity', 0.28);
 
             node.append('text').attr('text-anchor', 'middle').attr('dy', '0.32em')
@@ -2297,28 +2427,560 @@ Check your Browserslist config to be sure that your targets are set up correctly
             node.on('mousemove', (event, t) => {
                 tooltip.innerHTML =
                     `<div class="font-medium break-all">${esc(t.name)}</div>` +
-                    `<div>${t.kind} &middot; ${fmtDuration(t.duration)} &middot; ` +
-                    `${t.source_count} unit${t.source_count === 1 ? '' : 's'}</div>` +
-                    `<div>Critical path total: ${fmtDuration(longest.get(t.name))}</div>`;
+                    `<div>${t.kind} &middot; own ${fmtDuration(t.duration)} &middot; subtree ${fmtDuration(computeSubtree(t.name))}</div>` +
+                    `<div>${fanIn.get(t.name) || 0} dependents &middot; ${(depsOf.get(t.name) || []).length} dependencies &middot; ` +
+                    `${t.source_count} unit${t.source_count === 1 ? '' : 's'}</div>`;
                 tooltip.style.left = (event.pageX + 14) + 'px';
                 tooltip.style.top = (event.pageY + 14) + 'px';
                 tooltip.classList.remove('hidden');
             }).on('mouseleave', () => tooltip.classList.add('hidden'));
 
+            const unit = grouped ? 'modules' : 'targets';
             const note = kept.length < totalTargets ? ` (showing the heaviest ${kept.length})` : '';
             summaryEl.innerHTML =
-                `${kept.length} of ${totalTargets} targets${note} &middot; ${edges.length} links. ` +
+                `${kept.length} of ${totalTargets} ${unit}${note} &middot; ${edges.length} links. ` +
                 `Critical path: <span class="font-medium">${fmtDuration(rootValue)}</span> ` +
                 `through <span class="font-medium">${esc(root)}</span>.`;
+
+            // The critical path, as an ordered list.
+            if (criticalChain.length > 1) {
+                let cumulative = 0;
+                const rows = criticalChain.map((name, index) => {
+                    const ownTime = own.get(name) || 0;
+                    cumulative += ownTime;
+                    return `<tr class="border-b dark:border-gray-700">
+                        <td class="p-1 text-gray-400 dark:text-gray-500">${index + 1}</td>
+                        <td class="p-1 break-all">${esc(name)}</td>
+                        <td class="p-1">${fmtDuration(ownTime)}</td>
+                        <td class="p-1 text-gray-500 dark:text-gray-400">${fmtDuration(cumulative)}</td>
+                    </tr>`;
+                }).join('');
+                critEl.innerHTML = `<h3 class="text-lg font-semibold mb-2">Critical path (${criticalChain.length} ${unit})</h3>` +
+                    `<div class="max-h-72 overflow-y-auto"><table class="w-full text-sm"><thead><tr class="border-b dark:border-gray-700">` +
+                    `<th class="text-left p-1">#</th><th class="text-left p-1">Target</th>` +
+                    `<th class="text-left p-1">Own</th><th class="text-left p-1">Cumulative</th>` +
+                    `</tr></thead><tbody>${rows}</tbody></table></div>`;
+            }
         }
 
         document.getElementById('targets-max').addEventListener('input', (e) => {
             document.getElementById('targets-max-label').textContent = e.target.value;
             renderTargetGraph();
         });
-        ['targets-reduce', 'targets-interface', 'targets-critical'].forEach(id => {
+        ['targets-reduce', 'targets-interface', 'targets-critical', 'targets-group'].forEach(id => {
             document.getElementById(id).addEventListener('change', renderTargetGraph);
         });
+        document.getElementById('targets-metric').addEventListener('change', renderTargetGraph);
+
+        // ---- Build flame graph and architecture suggestions ----
+        // The flame graph shows build time as nested frames: the whole build,
+        // then modules, then targets (or translation units), then phases. A
+        // frame's width is proportional to its time. A click zooms into it.
+        let flameRoot = null;   // The full tree.
+        let flameFocus = null;  // The node shown as the root now.
+        let flameCrumb = [];    // The current zoom path, for the breadcrumb.
+
+        // Returns the first n path parts of a file's directory.
+        function topDirOf(path, n) {
+            const norm = normalizePath(path);
+            const i = norm.lastIndexOf('/');
+            const dir = i === -1 ? '' : norm.slice(0, i);
+            if (!dir) return '(root)';
+            return dir.split('/').slice(0, n).join('/');
+        }
+
+        // Sets the parent pointer on every node, so a frame can find its path.
+        function linkFlameParents(node) {
+            for (const child of node.children || []) {
+                child.parent = node;
+                linkFlameParents(child);
+            }
+        }
+
+        // Builds the flame tree. It uses the target graph when it is present,
+        // and the translation units otherwise.
+        function buildFlameTree() {
+            const graph = reportData && reportData.analysis && reportData.analysis.targets;
+            const targets = ((graph && graph.targets) || []).filter(t => t.kind !== 'interface');
+            const root = { name: 'All targets', value: 0, kind: 'root', children: [] };
+
+            if (targets.length) {
+                const modules = new Map();
+                for (const t of targets) {
+                    const key = targetModule(t);
+                    let m = modules.get(key);
+                    if (!m) { m = { name: key, value: 0, kind: 'module', children: [] }; modules.set(key, m); }
+                    const value = Math.max(0, t.duration || 0);
+                    m.children.push({ name: t.name, value, kind: t.kind });
+                    m.value += value;
+                }
+                for (const m of modules.values()) {
+                    m.children.sort((a, b) => b.value - a.value);
+                    root.children.push(m);
+                    root.value += m.value;
+                }
+                if (root.value > 0) {
+                    root.children.sort((a, b) => b.value - a.value);
+                    return root;
+                }
+            }
+
+            // Fall back to translation units grouped by directory.
+            root.name = 'All units';
+            const modules = new Map();
+            for (const [id, u] of Object.entries(state.units)) {
+                const total = Math.max(0, u.total_duration || 0);
+                if (!total) continue;
+                const key = topDirOf(s(id), 2);
+                let m = modules.get(key);
+                if (!m) { m = { name: key, value: 0, kind: 'module', children: [] }; modules.set(key, m); }
+                const frontend = Math.max(0, u.frontend_duration || 0);
+                const backend = Math.max(0, u.backend_duration || 0);
+                const other = Math.max(0, total - frontend - backend);
+                const phases = [
+                    { name: 'frontend', value: frontend, kind: 'frontend' },
+                    { name: 'backend', value: backend, kind: 'backend' },
+                    { name: 'other', value: other, kind: 'other' },
+                ].filter(p => p.value > 0);
+                m.children.push({ name: s(id), value: total, kind: 'unit', unit: id, children: phases });
+                m.value += total;
+            }
+            for (const m of modules.values()) {
+                m.children.sort((a, b) => b.value - a.value);
+                root.children.push(m);
+                root.value += m.value;
+            }
+            root.children.sort((a, b) => b.value - a.value);
+            return root;
+        }
+
+        // Returns a stable color for a flame frame. Frames in the same module
+        // share a hue, and compile phases get distinct lightness.
+        function flameColor(node) {
+            let seed = node;
+            while (seed.parent && seed.parent.kind !== 'root') seed = seed.parent;
+            const name = seed.name || '';
+            let h = 0;
+            for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) % 360;
+            if (node.kind === 'frontend') return `hsl(${h}, 55%, 60%)`;
+            if (node.kind === 'backend') return `hsl(${h}, 55%, 45%)`;
+            if (node.kind === 'other') return `hsl(${h}, 35%, 72%)`;
+            return `hsl(${h}, 45%, 55%)`;
+        }
+
+        // Text on a dark frame is white; otherwise it is near-black.
+        function flameTextColor(node) {
+            return node.kind === 'backend' ? '#ffffff' : 'rgba(17,24,39,0.9)';
+        }
+
+        function renderFlame() {
+            const svgEl = document.getElementById('flameGraph');
+            const emptyEl = document.getElementById('flame-empty');
+            const crumbEl = document.getElementById('flame-breadcrumb');
+            const tip = document.getElementById('flame-tooltip');
+            const svg = d3.select(svgEl);
+            svg.selectAll('*').remove();
+
+            const root = flameFocus || flameRoot;
+            if (!root || !(root.value > 0)) {
+                emptyEl.classList.remove('hidden');
+                emptyEl.textContent = 'No build data to show.';
+                crumbEl.textContent = '';
+                return;
+            }
+            emptyEl.classList.add('hidden');
+
+            const rowH = 24;
+            let maxDepth = 0;
+            (function walk(n, d) {
+                maxDepth = Math.max(maxDepth, d);
+                for (const c of n.children || []) walk(c, d + 1);
+            })(root, 0);
+            const width = svgEl.clientWidth || 900;
+            svg.attr('height', Math.max(rowH, (maxDepth + 1) * rowH));
+
+            // Assign an x-range to every frame below the root.
+            const frames = [];
+            (function place(n, x0, depth) {
+                const span = root.value > 0 ? (n.value / root.value) * width : 0;
+                n._x0 = x0;
+                n._x1 = x0 + span;
+                n._depth = depth;
+                if (span < 0.5) return;
+                frames.push(n);
+                let cursor = x0;
+                for (const c of n.children || []) {
+                    place(c, cursor, depth + 1);
+                    cursor += root.value > 0 ? (c.value / root.value) * width : 0;
+                }
+            })(root, 0, 0);
+
+            const g = svg.append('g');
+            const frame = g.selectAll('g').data(frames).join('g');
+            frame.append('rect')
+                .attr('x', n => n._x0 + 1)
+                .attr('y', n => n._depth * rowH + 1)
+                .attr('width', n => Math.max(0, n._x1 - n._x0 - 2))
+                .attr('height', rowH - 2)
+                .attr('rx', 2)
+                .attr('fill', n => flameColor(n))
+                .attr('fill-opacity', n => (n === root ? 0.4 : 0.9))
+                .style('cursor', n => ((n.children || []).length ? 'zoom-in' : 'default'))
+                .on('click', (event, n) => {
+                    if ((n.children || []).length) { flameFocus = n; renderFlame(); }
+                })
+                .on('mousemove', (event, n) => {
+                    const share = root.value > 0 ? (n.value / root.value) * 100 : 0;
+                    tip.innerHTML =
+                        `<div class="font-medium break-all">${esc(n.name)}</div>` +
+                        `<div>${fmtDuration(n.value)} &middot; ${share.toFixed(1)}%</div>` +
+                        (n.kind ? `<div class="text-gray-300">${esc(n.kind)}</div>` : '');
+                    tip.style.left = (event.pageX + 14) + 'px';
+                    tip.style.top = (event.pageY + 14) + 'px';
+                    tip.classList.remove('hidden');
+                })
+                .on('mouseleave', () => tip.classList.add('hidden'));
+
+            frame.append('text')
+                .attr('x', n => n._x0 + 5)
+                .attr('y', n => n._depth * rowH + rowH / 2 + 3)
+                .attr('font-size', 11)
+                .attr('pointer-events', 'none')
+                .attr('fill', n => flameTextColor(n))
+                .text(n => {
+                    const w = n._x1 - n._x0;
+                    if (w < 44) return '';
+                    const label = n.name;
+                    const max = Math.floor(w / 6.4);
+                    return label.length > max ? label.slice(0, Math.max(1, max - 1)) + '\u2026' : label;
+                });
+
+            flameCrumb = [];
+            for (let n = root; n; n = n.parent) flameCrumb.unshift(n);
+            crumbEl.innerHTML = flameCrumb.map((n, i) =>
+                i === flameCrumb.length - 1
+                    ? `<span class="font-medium">${esc(basename(n.name) || n.name)}</span>`
+                    : `<button class="text-blue-600 dark:text-blue-400 hover:underline" onclick="flameZoomTo(${i})">${esc(basename(n.name) || n.name)}</button>`
+            ).join(' <span class="text-gray-400">/</span> ');
+        }
+
+        function flameZoomTo(index) {
+            flameFocus = flameCrumb[index] || null;
+            renderFlame();
+        }
+
+        // Finds the strongly connected components of the module graph. Any
+        // component with more than one member is a dependency cycle.
+        function findModuleCycles(moduleDeps) {
+            const index = new Map();
+            const low = new Map();
+            const onStack = new Set();
+            const stack = [];
+            const cycles = [];
+            let counter = 0;
+            const connect = (v) => {
+                index.set(v, counter);
+                low.set(v, counter);
+                counter += 1;
+                stack.push(v);
+                onStack.add(v);
+                for (const w of moduleDeps.get(v) || []) {
+                    if (!index.has(w)) {
+                        connect(w);
+                        low.set(v, Math.min(low.get(v), low.get(w)));
+                    } else if (onStack.has(w)) {
+                        low.set(v, Math.min(low.get(v), index.get(w)));
+                    }
+                }
+                if (low.get(v) === index.get(v)) {
+                    const component = [];
+                    let w;
+                    do {
+                        w = stack.pop();
+                        onStack.delete(w);
+                        component.push(w);
+                    } while (w !== v);
+                    if (component.length > 1) cycles.push(component);
+                }
+            };
+            for (const v of moduleDeps.keys()) if (!index.has(v)) connect(v);
+            return cycles;
+        }
+
+        // Aggregates the target graph into modules. This is the shared input of
+        // the KPI strip and the suggestions. It returns null without targets.
+        function moduleStats() {
+            const graph = reportData && reportData.analysis && reportData.analysis.targets;
+            const allTargets = ((graph && graph.targets) || []).filter(t => t.kind !== 'interface');
+            if (!allTargets.length) return null;
+
+            const names = new Set(allTargets.map(t => t.name));
+            const targetEdges = (graph.edges || []).filter(e => names.has(e.from) && names.has(e.to));
+            const modules = new Map();
+            const moduleOf = new Map();
+            for (const t of allTargets) {
+                const key = targetModule(t);
+                moduleOf.set(t.name, key);
+                let m = modules.get(key);
+                if (!m) { m = { name: key, own: 0, targets: [], fanIn: 0, subtree: 0 }; modules.set(key, m); }
+                m.own += Math.max(0, t.duration || 0);
+                m.targets.push(t);
+            }
+            const moduleDeps = new Map([...modules.keys()].map(k => [k, new Set()]));
+            const targetFanIn = new Map([...names].map(n => [n, 0]));
+            for (const e of targetEdges) {
+                targetFanIn.set(e.to, (targetFanIn.get(e.to) || 0) + 1);
+                const a = moduleOf.get(e.from);
+                const b = moduleOf.get(e.to);
+                if (a && b && a !== b) moduleDeps.get(a).add(b);
+            }
+            for (const deps of moduleDeps.values()) for (const b of deps) modules.get(b).fanIn += 1;
+
+            // Subtree time per module: its own time plus every module it reaches.
+            const reachCache = new Map();
+            const reach = (k, stack) => {
+                if (reachCache.has(k)) return reachCache.get(k);
+                const set = new Set();
+                reachCache.set(k, set);
+                if (!stack.has(k)) {
+                    stack.add(k);
+                    for (const d of moduleDeps.get(k) || []) {
+                        set.add(d);
+                        for (const x of reach(d, stack)) set.add(x);
+                    }
+                    stack.delete(k);
+                }
+                return set;
+            };
+            for (const m of modules.values()) {
+                let total = m.own;
+                for (const d of reach(m.name, new Set())) total += modules.get(d).own;
+                m.subtree = total;
+            }
+
+            const totalOwn = allTargets.reduce((a, t) => a + Math.max(0, t.duration || 0), 0);
+            const cycles = findModuleCycles(moduleDeps);
+
+            // The longest serial chain of modules.
+            const longest = new Map();
+            const nextHop = new Map();
+            const chainFrom = (k, stack) => {
+                if (longest.has(k)) return longest.get(k);
+                if (stack.has(k)) return 0;
+                stack.add(k);
+                let best = null;
+                let bestValue = -1;
+                for (const d of moduleDeps.get(k) || []) {
+                    const value = chainFrom(d, stack);
+                    if (value > bestValue) { bestValue = value; best = d; }
+                }
+                stack.delete(k);
+                const total = modules.get(k).own + Math.max(0, bestValue);
+                longest.set(k, total);
+                nextHop.set(k, best);
+                return total;
+            };
+            for (const k of modules.keys()) chainFrom(k, new Set());
+            let chainRoot = null;
+            let chainValue = -1;
+            for (const [k, v] of longest) if (v > chainValue) { chainValue = v; chainRoot = k; }
+            const chain = [];
+            const seen = new Set();
+            for (let k = chainRoot; k && !seen.has(k); k = nextHop.get(k)) { seen.add(k); chain.push(k); }
+
+            const heaviest = [...modules.values()].sort((a, b) => b.subtree - a.subtree)[0] || null;
+            return { graph, allTargets, targetEdges, modules, moduleDeps, targetFanIn, totalOwn, cycles, chain, chainValue, heaviest };
+        }
+
+        // Draws the small figures at the top of the tab.
+        function renderTargetsKpis() {
+            const el = document.getElementById('targets-kpis');
+            const stats = moduleStats();
+            if (!stats) { el.innerHTML = ''; return; }
+            const kpi = (label, value) => `<div class="p-2 bg-gray-50 rounded dark:bg-gray-900"><div class="text-xs text-gray-500 uppercase tracking-wide dark:text-gray-400">${label}</div><div class="font-medium">${value}</div></div>`;
+            const heavy = stats.heaviest;
+            el.innerHTML =
+                kpi('Targets', stats.allTargets.length) +
+                kpi('Modules', stats.modules.size) +
+                kpi('Cycles', stats.cycles.length ? `<span class="text-red-600 dark:text-red-400">${stats.cycles.length}</span>` : '0') +
+                kpi('Critical path', fmtDuration(stats.chainValue)) +
+                kpi('Heaviest module', heavy ? `${esc(heavy.name)} <span class="text-gray-500 dark:text-gray-400">(${fmtDuration(heavy.subtree)})</span>` : '-');
+        }
+
+        // Renders the tab. It shows the selected view and updates the switch.
+        function renderTargetsTab() {
+            renderTargetsKpis();
+            const view = state.targetsView || 'graph';
+            for (const v of ['graph', 'flame', 'suggestions']) {
+                document.getElementById('targets-view-' + v).classList.toggle('hidden', v !== view);
+            }
+            document.querySelectorAll('.targets-view-btn').forEach(b => {
+                const active = b.dataset.view === view;
+                b.classList.toggle('bg-blue-500', active);
+                b.classList.toggle('text-white', active);
+                b.classList.toggle('text-gray-600', !active);
+                b.classList.toggle('dark:text-gray-400', !active);
+            });
+            if (view === 'flame') {
+                if (!flameRoot) {
+                    flameRoot = buildFlameTree();
+                    linkFlameParents(flameRoot);
+                }
+                renderFlame();
+            } else if (view === 'suggestions') {
+                renderArchSuggestions();
+            } else {
+                renderTargetGraph();
+            }
+        }
+
+        function setTargetsView(view) {
+            state.targetsView = view;
+            renderTargetsTab();
+        }
+
+        // Opens the graph view, grouped or not, as requested by a suggestion.
+        function showTargetInGraph(grouped) {
+            const box = document.getElementById('targets-group');
+            if (box) box.checked = !!grouped;
+            flameRoot = null;
+            flameFocus = null;
+            state.targetsView = 'graph';
+            renderTargetsTab();
+        }
+
+        function renderArchSuggestions() {
+            const el = document.getElementById('arch-suggestions');
+            const summary = document.getElementById('arch-summary');
+            const stats = moduleStats();
+            if (!stats) {
+                summary.textContent = '';
+                el.innerHTML = '<div class="text-amber-700 dark:text-amber-300">No CMake target data. The build directory needs a CMake File API reply or a build.ninja file for architecture suggestions.</div>';
+                return;
+            }
+            const { allTargets, modules, targetFanIn, totalOwn, cycles, chain, chainValue } = stats;
+            const suggestions = [];
+
+            // 1. Dependency cycles between modules.
+            for (const component of cycles) {
+                const members = component.slice().sort((a, b) => modules.get(b).own - modules.get(a).own);
+                suggestions.push({
+                    severity: 'high',
+                    category: 'Dependency cycle',
+                    title: `${members.join(' \u21c4 ')} depend on each other`,
+                    detail: 'Modules in a cycle cannot build in parallel, and a change to any one of them rebuilds the others. Move the shared types into a lower-level module, or invert one edge with an interface target.',
+                    impact: members.reduce((a, m) => a + modules.get(m).own, 0),
+                    grouped: true,
+                });
+            }
+
+            // 2. Chokepoints: targets with the most dependents.
+            const chokepoints = allTargets
+                .map(t => ({ t, fanIn: targetFanIn.get(t.name) || 0 }))
+                .filter(x => x.fanIn >= 3)
+                .sort((a, b) => b.fanIn - a.fanIn)
+                .slice(0, 5);
+            for (const { t, fanIn } of chokepoints) {
+                suggestions.push({
+                    severity: 'medium',
+                    category: 'Chokepoint',
+                    title: `${t.name} has ${fanIn} dependents`,
+                    detail: 'Every change to this target invalidates its dependents. Keep its interface stable, and expose it as an interface library so only implementation changes force a rebuild.',
+                    impact: Math.max(0, t.duration || 0) * fanIn,
+                    grouped: false,
+                });
+            }
+
+            // 3. Heavy modules by subtree time.
+            if (totalOwn > 0) {
+                for (const m of [...modules.values()].sort((a, b) => b.subtree - a.subtree).slice(0, 5)) {
+                    const share = (m.subtree / totalOwn) * 100;
+                    if (share < 5) break;
+                    suggestions.push({
+                        severity: 'medium',
+                        category: 'Heavy module',
+                        title: `${m.name} reaches ${share.toFixed(0)}% of build time`,
+                        detail: `Its own translation units take ${fmtDuration(m.own)}, and its dependencies add ${fmtDuration(m.subtree - m.own)}. Splitting it, or trimming its dependencies, reduces the rebuild surface.`,
+                        impact: m.subtree,
+                        grouped: true,
+                    });
+                }
+            }
+
+            // 4. The longest serial chain of modules.
+            if (chain.length >= 3 && totalOwn > 0) {
+                suggestions.push({
+                    severity: 'info',
+                    category: 'Critical path',
+                    title: `Serial chain of ${chain.length} modules`,
+                    detail: `${chain.join(' \u2192 ')} add up to ${fmtDuration(chainValue)}. Break the chain where the data dependency allows, so the branches can compile in parallel.`,
+                    impact: chainValue,
+                    grouped: true,
+                });
+            }
+
+            const order = { high: 0, medium: 1, info: 2 };
+            suggestions.sort((a, b) => (order[a.severity] - order[b.severity]) || (b.impact - a.impact));
+
+            if (!suggestions.length) {
+                summary.innerHTML = `<span class="text-green-700 dark:text-green-300">No structural problems detected across ${modules.size} modules.</span>`;
+                el.innerHTML = '';
+                return;
+            }
+
+            const cycleCount = cycles.length;
+            summary.innerHTML =
+                `${allTargets.length} targets in ${modules.size} modules. ` +
+                (cycleCount
+                    ? `<span class="text-red-600 dark:text-red-400 font-medium">${cycleCount} dependency cycle${cycleCount > 1 ? 's' : ''}</span>. `
+                    : 'No dependency cycles. ') +
+                `Estimated serial time in suggestions: <span class="font-medium">${fmtDuration(suggestions.reduce((a, s) => a + s.impact, 0))}</span>.`;
+
+            const color = { high: 'text-red-600 dark:text-red-400', medium: 'text-amber-600 dark:text-amber-400', info: 'text-blue-600 dark:text-blue-400' };
+            const badge = { high: 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300', medium: 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300', info: 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300' };
+            el.innerHTML = suggestions.map(s =>
+                `<div class="rounded border border-gray-200 dark:border-gray-700 p-3">
+                    <div class="flex items-center gap-2 mb-1">
+                        <span class="inline-block ${badge[s.severity]} px-2 py-0.5 rounded text-xs font-medium">${esc(s.category)}</span>
+                        <span class="font-medium ${color[s.severity]} break-all">${esc(s.title)}</span>
+                        <span class="ml-auto text-xs text-gray-500 dark:text-gray-400 whitespace-nowrap">\u2248 ${fmtDuration(s.impact)}</span>
+                    </div>
+                    <div class="text-sm text-gray-600 dark:text-gray-400">${esc(s.detail)}</div>
+                    <div class="mt-2">
+                        <button onclick="showTargetInGraph(${s.grouped ? 'true' : 'false'})" class="text-xs bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:bg-blue-100 hover:text-blue-700 dark:hover:bg-blue-900/40 dark:hover:text-blue-300 px-2 py-0.5 rounded">Show in graph</button>
+                    </div>
+                </div>`
+            ).join('');
+        }
+
+        document.querySelectorAll('.targets-view-btn').forEach(btn => {
+            btn.addEventListener('click', () => setTargetsView(btn.dataset.view));
+        });
+
+        document.getElementById('targets-max').addEventListener('input', (e) => {
+            document.getElementById('targets-max-label').textContent = e.target.value;
+            renderTargetsTab();
+        });
+        document.getElementById('targets-group').addEventListener('change', () => {
+            flameRoot = null;
+            flameFocus = null;
+            renderTargetsTab();
+        });
+        document.getElementById('targets-interface').addEventListener('change', () => {
+            flameRoot = null;
+            flameFocus = null;
+            renderTargetsTab();
+        });
+        ['targets-reduce', 'targets-critical'].forEach(id => {
+            document.getElementById(id).addEventListener('change', renderTargetsTab);
+        });
+        document.getElementById('targets-metric').addEventListener('change', renderTargetsTab);
+
+        document.getElementById('flame-reset').addEventListener('click', () => {
+            flameFocus = null;
+            renderFlame();
+        });
+
 
         // The shared detail-page building blocks. They give every detail page
         // the same layout: a KPI strip, a section wrapper, and a list table.

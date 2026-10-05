@@ -670,7 +670,7 @@ pub fn analyze_build_dir(
         };
         durations.insert(absolute, unit.total_duration);
     }
-    analysis.result.targets = crate::targets::build(build_dir, &durations);
+    analysis.result.targets = crate::targets::build(build_dir, analysis.root.as_deref(), &durations);
     analysis
 }
 

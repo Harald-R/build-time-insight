@@ -17,6 +17,9 @@ pub struct TargetNode {
     /// Artifact kind: `executable`, `static`, `shared`, `object`, `interface`,
     /// or `unknown`.
     pub kind: String,
+    /// Most common source directory of the target. Empty when unknown.
+    #[serde(default)]
+    pub dir: String,
     /// Summed compile time of the target's translation units, in microseconds.
     pub duration: i64,
     /// Number of translation units in the target.
@@ -60,6 +63,7 @@ struct RawTarget {
 /// unit's total duration. Returns `None` when no target data is found.
 pub fn build(
     build_dir: &str,
+    root: Option<&str>,
     durations: &HashMap<String, i64>,
 ) -> Option<TargetGraph> {
     let raw = load_raw_targets(build_dir)?;
@@ -80,6 +84,32 @@ pub fn build(
         }
     }
 
+    // The most common source directory of each target, relative to the root.
+    let mut dir_counts: HashMap<String, HashMap<String, usize>> = HashMap::new();
+    for (source, target) in &source_target {
+        let dir = source.rsplit_once('/').map(|(d, _)| d).unwrap_or("").to_string();
+        *dir_counts
+            .entry(target.clone())
+            .or_default()
+            .entry(dir)
+            .or_insert(0) += 1;
+    }
+    let target_dir = |target: &str| -> String {
+        let dir = dir_counts
+            .get(target)
+            .and_then(|counts| counts.iter().max_by_key(|(_, count)| **count))
+            .map(|(dir, _)| dir.clone())
+            .unwrap_or_default();
+        match root {
+            Some(root) => dir
+                .strip_prefix(root)
+                .and_then(|rest| rest.strip_prefix('/'))
+                .map(str::to_string)
+                .unwrap_or(dir),
+            None => dir,
+        }
+    };
+
     let names: Vec<String> = raw.iter().map(|t| t.name.clone()).collect();
     let name_set: std::collections::HashSet<&str> = names.iter().map(|s| s.as_str()).collect();
 
@@ -90,6 +120,7 @@ pub fn build(
             TargetNode {
                 name: t.name.clone(),
                 kind: t.kind.clone(),
+                dir: target_dir(&t.name),
                 duration,
                 source_count,
             }
