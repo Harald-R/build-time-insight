@@ -244,6 +244,25 @@ Check your Browserslist config to be sure that your targets are set up correctly
 </head>
 
 <body class="bg-gray-50 dark:bg-gray-900 font-sans text-gray-900 dark:text-gray-100">
+    <!-- Report loading overlay. Covers the dashboard while a report is read,
+         decompressed, decoded, and rendered. -->
+    <div id="loading-overlay" class="hidden fixed inset-0 z-50 flex items-center justify-center bg-gray-900/50 backdrop-blur-sm"
+        role="alert" aria-busy="true" aria-live="polite">
+        <div class="w-80 max-w-[85vw] rounded-lg bg-white p-5 shadow-xl dark:bg-gray-800">
+            <div class="flex items-center gap-3">
+                <svg class="h-5 w-5 animate-spin text-blue-500" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 0 1 8-8v4a4 4 0 0 0-4 4H4z"></path>
+                </svg>
+                <div class="text-sm font-medium text-gray-900 dark:text-gray-100">Loading report&hellip;</div>
+            </div>
+            <div class="mt-4 h-2 w-full overflow-hidden rounded-full bg-gray-200 dark:bg-gray-700">
+                <div id="loading-bar" class="h-full rounded-full bg-blue-500 transition-all duration-300" style="width: 0%"></div>
+            </div>
+            <div id="loading-status" class="mt-2 text-xs text-gray-500 dark:text-gray-400">Reading file&hellip;</div>
+        </div>
+    </div>
+
     <div id="main-page" class="page flex flex-col md:flex-row min-h-screen">
         <!-- Sidebar -->
         <aside id="main-sidebar" class="w-full md:w-72 shrink-0 bg-white dark:bg-gray-800 border-b md:border-b-0 md:border-r border-gray-200 dark:border-gray-700 p-5 flex flex-col gap-6 md:h-screen md:sticky md:top-0 md:overflow-y-auto">
@@ -900,20 +919,49 @@ Check your Browserslist config to be sure that your targets are set up correctly
             document.getElementById('upload-clear').classList.remove('hidden');
         }
 
+        // ---- Loading indicator ----
+        // Shows the overlay at the given status and progress percentage.
+        function showLoading(status, pct) {
+            document.getElementById('loading-overlay').classList.remove('hidden');
+            document.getElementById('loading-status').textContent = status;
+            document.getElementById('loading-bar').style.width = pct + '%';
+        }
+
+        function hideLoading() {
+            document.getElementById('loading-overlay').classList.add('hidden');
+            document.getElementById('loading-bar').style.width = '0%';
+        }
+
+        // Yields to the browser so the overlay repaints before the heavy
+        // synchronous decode and render steps run.
+        function nextFrame() {
+            return new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 0)));
+        }
+
         async function processFile(file) {
-            const reader = new FileReader();
-            reader.onload = async () => {
-                try {
-                    reportData = decodeMsgpack(await readReport(reader.result));
-                    render(reportData);
-                    setLoadedReportName(file.name);
-                    hideError();
-                    persistReport(file).catch(() => { });
-                } catch (err) {
-                    showError('Failed to parse report: ' + err.message);
-                }
-            };
-            reader.readAsArrayBuffer(file);
+            showLoading('Reading file\u2026', 10);
+            try {
+                const buffer = await file.arrayBuffer();
+                await nextFrame();
+
+                showLoading('Decompressing\u2026', 40);
+                const raw = await readReport(buffer);
+                await nextFrame();
+
+                showLoading('Decoding report\u2026', 70);
+                reportData = decodeMsgpack(raw);
+                await nextFrame();
+
+                showLoading('Rendering\u2026', 90);
+                render(reportData);
+                setLoadedReportName(file.name);
+                hideError();
+                persistReport(file).catch(() => { });
+            } catch (err) {
+                showError('Failed to parse report: ' + err.message);
+            } finally {
+                hideLoading();
+            }
         }
 
         // Restores the last report that loaded without errors.
