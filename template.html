@@ -938,6 +938,12 @@ Check your Browserslist config to be sure that your targets are set up correctly
             return new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 0)));
         }
 
+        // Runs fn after the browser has painted the current DOM. This keeps a
+        // freshly shown report visible before the slow charts are drawn.
+        function afterPaint(fn) {
+            requestAnimationFrame(() => requestAnimationFrame(fn));
+        }
+
         async function processFile(file) {
             showLoading('Reading file\u2026', 10);
             try {
@@ -1173,10 +1179,11 @@ Check your Browserslist config to be sure that your targets are set up correctly
             clearGraphFocus();
             Object.keys(sortState).forEach(updateSortIndicators);
 
-            renderActiveTab();
-
-            // Matches the URL hash to the new report. This handles deep links.
-            applyHash();
+            // Matches the URL hash to the new report (deep links too). It is
+            // deferred so the report shell paints before the charts draw.
+            // applyHash drives the active tab, so the overview Pareto is drawn
+            // once instead of twice.
+            afterPaint(applyHash);
         }
 
         function toolLabel(tool) {
@@ -1286,13 +1293,16 @@ Check your Browserslist config to be sure that your targets are set up correctly
             if (!rows.length || !total) { summary.textContent = ''; return; }
 
             const labels = rows.map(([id]) => basename(s(id)));
+            // Thousands of bars make borders expensive and invisible. Keep
+            // them only for small charts, where they separate the segments.
+            const big = rows.length > 200;
             const datasets = config.bars(rows).map(bar => ({
                 type: 'bar',
                 label: bar.label,
                 data: bar.data,
                 backgroundColor: bar.backgroundColor,
                 borderColor: bar.borderColor,
-                borderWidth: 1,
+                borderWidth: big ? 0 : 1,
             }));
 
             let cum = 0;
@@ -1323,11 +1333,19 @@ Check your Browserslist config to be sure that your targets are set up correctly
                 },
             );
 
-            updateChart(canvasId, {
+            const chartConfig = {
                 type: 'bar',
                 data: { labels, datasets },
                 options: {
                     responsive: true,
+                    // A large report draws thousands of bars, so animating them
+                    // is slow. Small charts keep the animation.
+                    animation: big ? false : undefined,
+                    // The axes are linear and the data is sorted, so Chart.js
+                    // can skip the min/max scan while parsing.
+                    normalized: true,
+                    // One tooltip for every dataset at the hovered index.
+                    interaction: { mode: 'index', intersect: false },
                     scales: {
                         x: {
                             stacked: config.stacked,
@@ -1357,7 +1375,21 @@ Check your Browserslist config to be sure that your targets are set up correctly
                         zoom: paretoZoom(canvasId),
                     },
                 },
-            });
+            };
+
+            // Reuse the existing chart when the report reloads or the theme
+            // changes. This keeps the zoom state and skips a full rebuild.
+            const existing = charts[canvasId];
+            if (existing) {
+                existing.data.labels = labels;
+                existing.data.datasets = datasets;
+                existing.options.animation = big ? false : undefined;
+                existing.options.scales.y.grid.color = gridColor();
+                existing.update('none');
+                updateChartReset(canvasId);
+            } else {
+                updateChart(canvasId, chartConfig);
+            }
         }
 
         // Renders the Pareto chart of compile time for each translation unit.
