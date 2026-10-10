@@ -162,7 +162,8 @@ fn keep_largest_chains(
     let mut entries: Vec<(Vec<StringId>, i64)> =
         map.iter().map(|(k, v)| (k.clone(), score(*v))).collect();
     entries.sort_by_key(|e| std::cmp::Reverse(e.1));
-    let keep_keys: HashSet<Vec<StringId>> = entries.into_iter().take(keep).map(|(k, _)| k).collect();
+    let keep_keys: HashSet<Vec<StringId>> =
+        entries.into_iter().take(keep).map(|(k, _)| k).collect();
     map.retain(|k, _| keep_keys.contains(k));
 }
 
@@ -181,9 +182,11 @@ fn prune_analysis(analysis: &mut AnalysisResult, max_per_unit: usize, max_templa
             .retain(|header, _| kept_headers.contains(header));
 
         // Keep the largest template instantiations.
-        keep_largest(&mut unit.function_template_instantiations, max_per_unit, |t| {
-            t.total_duration
-        });
+        keep_largest(
+            &mut unit.function_template_instantiations,
+            max_per_unit,
+            |t| t.total_duration,
+        );
         keep_largest(&mut unit.class_template_instantiations, max_per_unit, |t| {
             t.total_duration
         });
@@ -303,8 +306,9 @@ fn remap_analysis(analysis: &mut AnalysisResult, remap: &[u32]) {
         })
         .collect();
 
-    analysis.function_template_instantiations =
-        remap_map(std::mem::take(&mut analysis.function_template_instantiations));
+    analysis.function_template_instantiations = remap_map(std::mem::take(
+        &mut analysis.function_template_instantiations,
+    ));
     analysis.class_template_instantiations =
         remap_map(std::mem::take(&mut analysis.class_template_instantiations));
 }
@@ -516,8 +520,10 @@ mod tests {
         for i in 0..20 {
             unit.header_parse_duration
                 .insert(id_of(&format!("s{i:02}")), i as i64);
-            unit.function_template_instantiations
-                .insert(id_of(&format!("s{i:02}")), TemplateInstantiation::new(i as i64));
+            unit.function_template_instantiations.insert(
+                id_of(&format!("s{i:02}")),
+                TemplateInstantiation::new(i as i64),
+            );
         }
         let units = HashMap::from([(id_of("s00"), unit)]);
         let mut report = Report::new(

@@ -1,0 +1,4 @@
+# Clippy configuration. See https://doc.rust-lang.org/clippy/configuration.html
+#
+# Lints are enforced as errors in CI (`cargo clippy -- -D warnings`). Add any
+# project-wide lint thresholds or disallowed APIs here as the codebase grows.

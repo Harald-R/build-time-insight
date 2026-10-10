@@ -345,7 +345,11 @@ fn fixture_target_graph_is_correct() {
             .iter()
             .any(|e| e.from == "shapely" && e.to == "geometry_lib"),
         "expected a shapely -> geometry_lib edge, got: {:?}",
-        graph.edges.iter().map(|e| format!("{}->{}", e.from, e.to)).collect::<Vec<_>>()
+        graph
+            .edges
+            .iter()
+            .map(|e| format!("{}->{}", e.from, e.to))
+            .collect::<Vec<_>>()
     );
     // A target with sources must have a positive compile time.
     for target in &graph.targets {

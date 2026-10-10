@@ -87,7 +87,11 @@ pub fn build(
     // The most common source directory of each target, relative to the root.
     let mut dir_counts: HashMap<String, HashMap<String, usize>> = HashMap::new();
     for (source, target) in &source_target {
-        let dir = source.rsplit_once('/').map(|(d, _)| d).unwrap_or("").to_string();
+        let dir = source
+            .rsplit_once('/')
+            .map(|(d, _)| d)
+            .unwrap_or("")
+            .to_string();
         *dir_counts
             .entry(target.clone())
             .or_default()
@@ -467,7 +471,10 @@ mod tests {
 
     #[test]
     fn parses_target_name_from_artifacts() {
-        assert_eq!(target_name_from_artifact("libgeometry_lib.a"), "geometry_lib");
+        assert_eq!(
+            target_name_from_artifact("libgeometry_lib.a"),
+            "geometry_lib"
+        );
         assert_eq!(target_name_from_artifact("libfoo.so.1"), "foo");
         assert_eq!(target_name_from_artifact("shapely"), "shapely");
         assert_eq!(
@@ -499,9 +506,6 @@ mod tests {
             .iter()
             .map(|s| s.to_string())
             .collect();
-        assert_eq!(
-            find_output(&args).as_deref(),
-            Some("CMakeFiles/a.dir/x.o")
-        );
+        assert_eq!(find_output(&args).as_deref(), Some("CMakeFiles/a.dir/x.o"));
     }
 }
