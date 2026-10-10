@@ -9,4 +9,4 @@ a.out
 build-*/shapely
 
 # Generated report artifact
-/out.msgpack
+/report.bin

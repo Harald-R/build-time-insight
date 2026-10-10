@@ -227,10 +227,10 @@ mod tests {
             "analyze",
             "src",
             "-o",
-            "/tmp/r.msgpack",
+            "/tmp/r.bin",
         ])
         .unwrap();
-        assert_eq!(analyze_args(&cli).output, PathBuf::from("/tmp/r.msgpack"));
+        assert_eq!(analyze_args(&cli).output, PathBuf::from("/tmp/r.bin"));
     }
 
     #[test]
@@ -299,16 +299,16 @@ mod tests {
         let cli = Cli::try_parse_from([
             "build-time-insight",
             "compare",
-            "base.msgpack",
-            "target.msgpack",
+            "base.bin",
+            "target.bin",
         ])
         .unwrap();
         let args = match &cli.command {
             Command::Compare(args) => args,
             _ => panic!("expected Compare subcommand"),
         };
-        assert_eq!(args.base, PathBuf::from("base.msgpack"));
-        assert_eq!(args.target, PathBuf::from("target.msgpack"));
+        assert_eq!(args.base, PathBuf::from("base.bin"));
+        assert_eq!(args.target, PathBuf::from("target.bin"));
     }
 
     #[test]

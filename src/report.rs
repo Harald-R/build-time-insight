@@ -458,7 +458,7 @@ mod tests {
             .collect();
         let durations: Vec<(&str, i64)> = names.iter().map(|n| (n.as_str(), 1000)).collect();
         let report = report_with_unit_durations(&durations);
-        let path = std::env::temp_dir().join("gzip_check.msgpack");
+        let path = std::env::temp_dir().join("gzip_check.bin");
         write_report(&report, &path).unwrap();
         let file_bytes = std::fs::read(&path).unwrap();
         std::fs::remove_file(path).ok();
@@ -472,8 +472,8 @@ mod tests {
     #[test]
     fn gzip_output_is_deterministic() {
         let report = sample_report();
-        let path = std::env::temp_dir().join("gzip_det1.msgpack");
-        let path2 = std::env::temp_dir().join("gzip_det2.msgpack");
+        let path = std::env::temp_dir().join("gzip_det1.bin");
+        let path2 = std::env::temp_dir().join("gzip_det2.bin");
         write_report(&report, &path).unwrap();
         write_report(&report, &path2).unwrap();
         let a = std::fs::read(&path).unwrap();
@@ -486,7 +486,7 @@ mod tests {
     #[test]
     fn write_then_read_round_trips() {
         let report = sample_report();
-        let path = std::env::temp_dir().join("roundtrip.msgpack");
+        let path = std::env::temp_dir().join("roundtrip.bin");
         write_report(&report, &path).unwrap();
         let read = read_report(&path).unwrap();
         assert_eq!(read.analysis.unit_analysis.len(), 2);
@@ -574,7 +574,7 @@ mod tests {
         }
 
         // The pruned report must still write and read back.
-        let path = std::env::temp_dir().join("slim_roundtrip.msgpack");
+        let path = std::env::temp_dir().join("slim_roundtrip.bin");
         write_report(&report, &path).unwrap();
         let read = read_report(&path).unwrap();
         assert_eq!(read.analysis.unit_analysis.len(), 1);

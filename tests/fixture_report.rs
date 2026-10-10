@@ -297,7 +297,7 @@ fn fixture_report_round_trips() {
         BuildInfo::default(),
         analysis.result,
     );
-    let path = std::env::temp_dir().join("bti_fixture_roundtrip.msgpack");
+    let path = std::env::temp_dir().join("bti_fixture_roundtrip.bin");
     report::write_report(&report, &path).unwrap();
     let read = report::read_report(&path).unwrap();
     std::fs::remove_file(&path).ok();
