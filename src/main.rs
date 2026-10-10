@@ -175,12 +175,9 @@ fn run_analyze(args: &cli::AnalyzeArgs, quiet: bool) -> anyhow::Result<()> {
 
     let mut report = Report::new(analysis.strings, build_info, analysis.result);
     report.slim(args.max_per_unit, args.max_templates);
-    let path = args
-        .output
-        .clone()
-        .unwrap_or_else(|| std::env::temp_dir().join("report.msgpack"));
-    report::write_report(&report, &path)?;
-    log::info!("Wrote report to {}", path.display());
+    let path = &args.output;
+    report::write_report(&report, path)?;
+    println!("Wrote report to {}", path.display());
     Ok(())
 }
 

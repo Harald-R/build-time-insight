@@ -5,6 +5,9 @@ use std::thread;
 
 use clap::{Args, Parser, Subcommand};
 
+/// Default path the `analyze` command writes its report to.
+pub const DEFAULT_REPORT_PATH: &str = "report.bin";
+
 #[derive(Debug, Parser)]
 #[command(
     version,
@@ -47,8 +50,8 @@ pub struct AnalyzeArgs {
     pub jobs: Option<usize>,
 
     /// Path where the report is written.
-    #[arg(short, long)]
-    pub output: Option<PathBuf>,
+    #[arg(short, long, default_value = DEFAULT_REPORT_PATH)]
+    pub output: PathBuf,
 
     /// Number of entries to show in each top-N list.
     #[arg(short, long, value_parser = parse_limit)]
@@ -227,9 +230,15 @@ mod tests {
             "/tmp/r.msgpack",
         ])
         .unwrap();
+        assert_eq!(analyze_args(&cli).output, PathBuf::from("/tmp/r.msgpack"));
+    }
+
+    #[test]
+    fn test_output_defaults_to_report_bin() {
+        let cli = Cli::try_parse_from(["build-time-insight", "analyze", "src"]).unwrap();
         assert_eq!(
             analyze_args(&cli).output,
-            Some(PathBuf::from("/tmp/r.msgpack"))
+            PathBuf::from(DEFAULT_REPORT_PATH)
         );
     }
 
