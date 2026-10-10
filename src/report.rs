@@ -314,11 +314,17 @@ fn remap_analysis(analysis: &mut AnalysisResult, remap: &[u32]) {
 }
 
 /// Writes the report to the file at `path`.
+///
+/// Structs are encoded positionally (as MessagePack arrays) rather than as
+/// maps with field names. A large report repeats the same struct millions of
+/// times, so the field names dominated the payload when using
+/// `with_struct_map()`; positional encoding removes them entirely. The field
+/// order in each struct is therefore part of the on-disk format.
 pub fn write_report(report: &Report, path: &Path) -> Result<(), ReportError> {
     let file = File::create(path)?;
     let writer = BufWriter::new(file);
     let mut gz = GzEncoder::new(writer, Compression::default());
-    let mut serializer = rmp_serde::Serializer::new(&mut gz).with_struct_map();
+    let mut serializer = rmp_serde::Serializer::new(&mut gz);
     report.serialize(&mut serializer)?;
     gz.finish()?;
     Ok(())
@@ -415,7 +421,7 @@ mod tests {
 
     fn encode(report: &Report) -> Vec<u8> {
         let mut buf = Vec::new();
-        let mut ser = rmp_serde::Serializer::new(&mut buf).with_struct_map();
+        let mut ser = rmp_serde::Serializer::new(&mut buf);
         report.serialize(&mut ser).unwrap();
         buf
     }
@@ -427,8 +433,31 @@ mod tests {
     }
 
     #[test]
+    fn structs_are_encoded_without_field_names() {
+        let bytes = encode(&sample_report());
+        // Positional encoding must not repeat struct field names.
+        for name in [
+            b"total_duration".as_slice(),
+            b"num_instantiations",
+            b"parse_duration",
+            b"frontend_duration",
+        ] {
+            assert!(
+                !bytes.windows(name.len()).any(|w| w == name),
+                "encoded report contains field name {:?}",
+                std::str::from_utf8(name).unwrap()
+            );
+        }
+    }
+
+    #[test]
     fn written_report_is_gzip_compressed_and_smaller() {
-        let report = sample_report();
+        // Use a report large enough that gzip beats its own framing overhead.
+        let names: Vec<String> = (0..500)
+            .map(|i| format!("translation_unit_{i:04}.cpp"))
+            .collect();
+        let durations: Vec<(&str, i64)> = names.iter().map(|n| (n.as_str(), 1000)).collect();
+        let report = report_with_unit_durations(&durations);
         let path = std::env::temp_dir().join("gzip_check.msgpack");
         write_report(&report, &path).unwrap();
         let file_bytes = std::fs::read(&path).unwrap();

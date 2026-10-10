@@ -648,8 +648,9 @@ Check your Browserslist config to be sure that your targets are set up correctly
 
     <script>
         // Decodes a MessagePack buffer. It supports the subset that rmp-serde
-        // writes with with_struct_map(): maps, arrays, strings, integers, and
-        // floats.
+        // writes: maps, arrays, strings, integers, and floats. Structs are
+        // encoded positionally (as arrays); hydrateReport() restores the named
+        // fields the dashboard reads.
         function decodeMsgpack(buffer) {
             const view = new DataView(buffer);
             let offset = 0;
@@ -725,7 +726,100 @@ Check your Browserslist config to be sure that your targets are set up correctly
                 }
                 return new Map(entries);
             }
-            return decode();
+            return hydrateReport(decode());
+        }
+
+        // rmp-serde encodes structs as positional arrays (no field names), so
+        // the raw decoded tree must be mapped back to named objects. Field
+        // order matches the Rust structs in src/analyzer.rs, src/build_info.rs
+        // and src/targets.rs.
+        function hydrateReport(raw) {
+            const [strings, buildInfo, analysis] = raw;
+            return {
+                strings,
+                build_info: hydrateBuildInfo(buildInfo),
+                analysis: hydrateAnalysis(analysis),
+            };
+        }
+
+        function hydrateBuildInfo(raw) {
+            if (!raw) return raw;
+            return { toolchain: hydrateToolchain(raw[0]), git_commit: raw[1] };
+        }
+
+        function hydrateToolchain(raw) {
+            if (!raw) return raw;
+            const tool = t => (t ? { name: t[0], version: t[1] } : t);
+            return {
+                build_system: tool(raw[0]),
+                generator: tool(raw[1]),
+                cxx_compiler: tool(raw[2]),
+                c_compiler: tool(raw[3]),
+                linker: tool(raw[4]),
+            };
+        }
+
+        function hydrateAnalysis(raw) {
+            return {
+                unit_analysis: hydrateMap(raw[0], hydrateUnit),
+                header_analysis: hydrateMap(raw[1], hydrateHeader),
+                function_template_instantiations: hydrateMap(raw[2], hydrateTemplate),
+                class_template_instantiations: hydrateMap(raw[3], hydrateTemplate),
+                targets: hydrateTargets(raw[4]),
+            };
+        }
+
+        function hydrateUnit(raw) {
+            return {
+                total_duration: raw[0],
+                frontend_duration: raw[1],
+                backend_duration: raw[2],
+                template_instantiation_duration: raw[3],
+                header_parse_duration: raw[4],
+                header_inclusion_paths: raw[5],
+                header_usage: raw[6],
+                function_template_instantiations: hydrateMap(raw[7], hydrateTemplate),
+                class_template_instantiations: hydrateMap(raw[8], hydrateTemplate),
+            };
+        }
+
+        function hydrateTemplate(raw) {
+            return { total_duration: raw[0], num_instantiations: raw[1] };
+        }
+
+        function hydrateHeader(raw) {
+            return {
+                parse_duration: raw[0],
+                num_inclusions: raw[1],
+                unused_units: raw[2],
+                forward_declarable_units: raw[3],
+                definition_required_units: raw[4],
+                inclusion_paths: raw[5],
+            };
+        }
+
+        function hydrateTargets(raw) {
+            if (!raw) return raw;
+            return {
+                targets: raw[0].map(t => ({
+                    name: t[0], kind: t[1], dir: t[2], duration: t[3], source_count: t[4],
+                })),
+                edges: raw[1].map(e => ({ from: e[0], to: e[1] })),
+            };
+        }
+
+        // Hydrates the values of a decoded map (a plain object for primitive
+        // keys, a Map for object keys such as inclusion chains).
+        function hydrateMap(raw, hydrateValue) {
+            if (!raw) return raw;
+            if (raw instanceof Map) {
+                const out = new Map();
+                for (const [k, v] of raw) out.set(k, hydrateValue(v));
+                return out;
+            }
+            const out = {};
+            for (const k of Object.keys(raw)) out[k] = hydrateValue(raw[k]);
+            return out;
         }
 
         function fmtDuration(us) {
