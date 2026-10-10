@@ -274,7 +274,8 @@ fn fixture_build_dirs_report_correct_data() {
         .unwrap_or(4);
     for dir in &dirs {
         eprintln!("analyzing fixture build dir: {}", dir.display());
-        let analysis = analyzer::analyze_build_dir(dir.to_str().unwrap(), jobs, &[], false, false);
+        let analysis =
+            analyzer::analyze_build_dir(dir.to_str().unwrap(), jobs, &[], false, false).unwrap();
         assert_aggregation_invariants(&analysis.strings, &analysis.result);
         assert_fixture_structure(&analysis.strings, &analysis.result);
     }
@@ -287,7 +288,8 @@ fn fixture_report_round_trips() {
         eprintln!("SKIP: no fixture build dirs found; run tests/data/cpp-project/build-traces.sh");
         return;
     };
-    let analysis = analyzer::analyze_build_dir(dir.to_str().unwrap(), 4, &[], false, false);
+    let analysis =
+        analyzer::analyze_build_dir(dir.to_str().unwrap(), 4, &[], false, false).unwrap();
 
     // Serialize the analysis into a report, write it, and read it back.
     let report = Report::new(
@@ -319,7 +321,7 @@ fn fixture_header_usage_is_classified_correctly() {
         "analyzing header usage in fixture build dir: {}",
         dir.display()
     );
-    let analysis = analyzer::analyze_build_dir(dir.to_str().unwrap(), 4, &[], true, false);
+    let analysis = analyzer::analyze_build_dir(dir.to_str().unwrap(), 4, &[], true, false).unwrap();
     assert_header_usage(&analysis.strings, &analysis.result);
 }
 
@@ -330,7 +332,8 @@ fn fixture_target_graph_is_correct() {
         eprintln!("SKIP: no fixture build dirs found");
         return;
     };
-    let analysis = analyzer::analyze_build_dir(dir.to_str().unwrap(), 4, &[], false, false);
+    let analysis =
+        analyzer::analyze_build_dir(dir.to_str().unwrap(), 4, &[], false, false).unwrap();
     let Some(graph) = &analysis.result.targets else {
         eprintln!("SKIP: no CMake target data in the fixture build dir");
         return;

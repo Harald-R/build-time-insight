@@ -38,7 +38,7 @@ fn run_analyze(args: &cli::AnalyzeArgs, quiet: bool) -> anyhow::Result<()> {
         &args.exclude,
         args.header_usage,
         show_progress,
-    );
+    )?;
 
     println!("Longest files to compile:");
     for item in analysis.result.longest_unit_compilations(limit).enumerate() {

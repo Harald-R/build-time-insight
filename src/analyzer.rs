@@ -582,14 +582,20 @@ pub fn analyze(traces: Vec<FileTrace>) -> Analysis {
 /// Each worker thread processes one trace file completely (parse -> tree ->
 /// analyze) and returns only the small per-unit result, so peak memory scales
 /// with the number of worker threads.
+///
+/// Returns an error when the directory contains no trace files, which usually
+/// means the project was built without `-ftime-trace`.
 pub fn analyze_build_dir(
     build_dir: &str,
     jobs: usize,
     excludes: &[String],
     header_usage: bool,
     show_progress: bool,
-) -> Analysis {
+) -> anyhow::Result<Analysis> {
     let paths = crate::build_traces::glob_trace_paths(build_dir, excludes);
+    if paths.is_empty() {
+        anyhow::bail!("found no *.cpp.json traces in '{build_dir}'; compile with -ftime-trace");
+    }
     let bar = if show_progress {
         let bar = indicatif::ProgressBar::new(paths.len() as u64);
         bar.set_style(
@@ -672,7 +678,7 @@ pub fn analyze_build_dir(
     }
     analysis.result.targets =
         crate::targets::build(build_dir, analysis.root.as_deref(), &durations);
-    analysis
+    Ok(analysis)
 }
 
 /// Sort the string table and remap every id so that identical inputs produce
@@ -1401,7 +1407,7 @@ mod tests {
         std::fs::write(root.join("build/main.cpp.json"), json).unwrap();
 
         let analysis =
-            analyze_build_dir(root.join("build").to_str().unwrap(), 2, &[], false, false);
+            analyze_build_dir(root.join("build").to_str().unwrap(), 2, &[], false, false).unwrap();
         std::fs::remove_dir_all(&root).ok();
 
         assert!(analysis.id_of("src/main.cpp").is_some());
@@ -1422,12 +1428,23 @@ mod tests {
         write_trace_file(&dir, "broken.cpp.json", "{ not valid json");
         write_trace_file(&dir, "ignored.json", valid);
 
-        let result = analyze_build_dir(dir.to_str().unwrap(), 2, &[], false, false);
+        let result = analyze_build_dir(dir.to_str().unwrap(), 2, &[], false, false).unwrap();
         std::fs::remove_dir_all(&dir).ok();
 
         assert_eq!(result.result.unit_analysis.len(), 1);
         let unit_id = result.id_of("src/main.cpp").unwrap();
         let unit = &result.result.unit_analysis[&unit_id];
         assert_eq!(unit.total_duration, 100);
+    }
+
+    #[test]
+    fn analyze_build_dir_errors_without_traces() {
+        let dir = test_build_dir("analyze_build_dir_empty");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let err = analyze_build_dir(dir.to_str().unwrap(), 2, &[], false, false).unwrap_err();
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert!(err.to_string().contains("-ftime-trace"), "got: {err}");
     }
 }
