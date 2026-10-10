@@ -68,15 +68,16 @@ fn run_analyze(args: &cli::AnalyzeArgs, quiet: bool) -> anyhow::Result<()> {
 }
 
 fn run_report(args: &cli::ReportArgs) -> anyhow::Result<()> {
+    let limit = args.limit();
     let report = report::read_report(&args.report)?;
-    let summary = ReportSummary::from_report(&report, args.limit());
+    let summary = ReportSummary::from_report(&report, limit);
     match &args.json {
         Some(path) => {
             let file = std::fs::File::create(path)?;
             serde_json::to_writer_pretty(std::io::BufWriter::new(file), &summary)?;
             println!("Wrote report summary to {}", path.display());
         }
-        None => summary.print(),
+        None => summary.print(limit),
     }
     Ok(())
 }

@@ -137,7 +137,7 @@ impl AnalyzeArgs {
 impl ReportArgs {
     /// Resolve the number of entries per top-N list.
     pub fn limit(&self) -> usize {
-        self.limit.unwrap_or(10)
+        self.limit.unwrap_or(25)
     }
 }
 
@@ -281,9 +281,9 @@ mod tests {
     }
 
     #[test]
-    fn test_limit_defaults_to_ten() {
+    fn test_limit_defaults_to_25() {
         let cli = Cli::try_parse_from(["build-time-insight", "report", "Cargo.toml"]).unwrap();
-        assert_eq!(report_args(&cli).limit(), 10);
+        assert_eq!(report_args(&cli).limit(), 25);
     }
 
     #[test]
