@@ -7,6 +7,7 @@ use build_time_insight::{analyzer, build_info, cli};
 use std::io::IsTerminal;
 
 fn main() -> anyhow::Result<()> {
+    reset_broken_pipe();
     let cli = cli::Cli::parse();
     env_logger::Builder::from_env(
         env_logger::Env::default().default_filter_or(cli.log_level().to_string()),
@@ -20,6 +21,25 @@ fn main() -> anyhow::Result<()> {
         cli::Command::Compare(args) => run_compare(&args),
     }
 }
+
+/// Restores the default SIGPIPE behavior on Unix.
+///
+/// Rust ignores it by default, so writing to a closed pipe (for example
+/// `build-time-insight report report.bin | head`) makes `println!` panic.
+/// Restoring the default disposition makes the process terminate quietly, as
+/// most Unix command-line tools do.
+#[cfg(unix)]
+fn reset_broken_pipe() {
+    // SAFETY: setting the default disposition for SIGPIPE is sound and the
+    // call does not dereference any pointer.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+}
+
+/// No-op on platforms without SIGPIPE.
+#[cfg(not(unix))]
+fn reset_broken_pipe() {}
 
 fn run_analyze(args: &cli::AnalyzeArgs, quiet: bool) -> anyhow::Result<()> {
     let show_progress = !quiet && !args.no_progress && std::io::stderr().is_terminal();

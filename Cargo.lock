@@ -96,6 +96,7 @@ dependencies = [
  "glob",
  "indicatif",
  "itertools",
+ "libc",
  "log",
  "rayon",
  "rmp-serde",
