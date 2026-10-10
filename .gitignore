@@ -4,6 +4,9 @@ target
 
 **/*.rs.bk
 
+/*.bin
+/*.json
+
 .vscode
 .nvim.lua
 .nvimrc
