@@ -576,6 +576,11 @@ Check your Browserslist config to be sure that your targets are set up correctly
                                             id="cfg-compiler">-</span>
                                     </div>
                                     <div class="flex justify-between text-gray-600 dark:text-gray-400">
+                                        <span>C compiler</span>
+                                        <span class="font-medium text-gray-900 dark:text-gray-100"
+                                            id="cfg-c-compiler">-</span>
+                                    </div>
+                                    <div class="flex justify-between text-gray-600 dark:text-gray-400">
                                         <span>Linker</span>
                                         <span class="font-medium text-gray-900 dark:text-gray-100"
                                             id="cfg-linker">-</span>
@@ -1598,6 +1603,7 @@ Check your Browserslist config to be sure that your targets are set up correctly
             setText('cfg-build-system', tc && tc.build_system ? toolLabel(tc.build_system) : '-');
             setText('cfg-generator', tc && tc.generator ? toolLabel(tc.generator) : '-');
             setText('cfg-compiler', tc && tc.cxx_compiler ? toolLabel(tc.cxx_compiler) : '-');
+            setText('cfg-c-compiler', tc && tc.c_compiler ? toolLabel(tc.c_compiler) : '-');
             setText('cfg-linker', tc && tc.linker ? toolLabel(tc.linker) : '-');
             setText('cfg-commit', bi.git_commit || '-');
         }
