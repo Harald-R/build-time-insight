@@ -1,6 +1,12 @@
-# Build outputs and generated trace files (regenerated via build-traces.sh)
-/build-*/
-*.json
+# build-traces.sh regenerates each build directory locally. The frozen traces
+# (*.cpp.json), compile_commands.json and the CMake files are committed; only
+# the compiled outputs and build logs are ignored.
+*.o
+*.a
+*.so
+*.bin
+a.out
+build-*/shapely
 
 # Generated report artifact
 /out.msgpack
