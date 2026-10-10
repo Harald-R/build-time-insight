@@ -34,6 +34,9 @@ pub enum Command {
     /// Analyze a build directory and write a portable report.
     Analyze(AnalyzeArgs),
 
+    /// Read a report and print its results, or write them to JSON.
+    Report(ReportArgs),
+
     /// Compare two reports and print per-unit duration changes.
     Compare(CompareArgs),
 }
@@ -52,10 +55,6 @@ pub struct AnalyzeArgs {
     /// Path where the report is written.
     #[arg(short, long, default_value = DEFAULT_REPORT_PATH)]
     pub output: PathBuf,
-
-    /// Number of entries to show in each top-N list.
-    #[arg(short, long, value_parser = parse_limit)]
-    pub limit: Option<usize>,
 
     /// Glob patterns of trace files to exclude from the analysis; may be repeated.
     #[arg(short, long)]
@@ -78,6 +77,22 @@ pub struct AnalyzeArgs {
     /// Disable the progress bar.
     #[arg(long)]
     pub no_progress: bool,
+}
+
+/// Defines the arguments for the report command.
+#[derive(Debug, Args)]
+pub struct ReportArgs {
+    /// Report file to read.
+    #[arg(value_parser = validate_report_file)]
+    pub report: PathBuf,
+
+    /// Number of entries to show in each top-N list.
+    #[arg(short, long, value_parser = parse_limit)]
+    pub limit: Option<usize>,
+
+    /// Write the results to this JSON file instead of printing them.
+    #[arg(long)]
+    pub json: Option<PathBuf>,
 }
 
 /// Defines the arguments for the compare command.
@@ -117,7 +132,9 @@ impl AnalyzeArgs {
         let system = default_jobs();
         self.jobs.unwrap_or(system).min(system)
     }
+}
 
+impl ReportArgs {
     /// Resolve the number of entries per top-N list.
     pub fn limit(&self) -> usize {
         self.limit.unwrap_or(10)
@@ -161,6 +178,18 @@ fn validate_build_dir(s: &str) -> Result<PathBuf, String> {
     Ok(path)
 }
 
+/// Validates that a report file argument exists and is a file.
+fn validate_report_file(s: &str) -> Result<PathBuf, String> {
+    let path = PathBuf::from(s);
+    if !path.exists() {
+        return Err(format!("The report '{}' does not exist", path.display()));
+    }
+    if !path.is_file() {
+        return Err(format!("The report '{}' is not a file", path.display()));
+    }
+    Ok(path)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -169,6 +198,13 @@ mod tests {
         match &cli.command {
             Command::Analyze(args) => args,
             _ => panic!("expected Analyze subcommand"),
+        }
+    }
+
+    fn report_args(cli: &Cli) -> &ReportArgs {
+        match &cli.command {
+            Command::Report(args) => args,
+            _ => panic!("expected Report subcommand"),
         }
     }
 
@@ -222,14 +258,8 @@ mod tests {
 
     #[test]
     fn test_output_argument_sets_report_path() {
-        let cli = Cli::try_parse_from([
-            "build-time-insight",
-            "analyze",
-            "src",
-            "-o",
-            "/tmp/r.bin",
-        ])
-        .unwrap();
+        let cli = Cli::try_parse_from(["build-time-insight", "analyze", "src", "-o", "/tmp/r.bin"])
+            .unwrap();
         assert_eq!(analyze_args(&cli).output, PathBuf::from("/tmp/r.bin"));
     }
 
@@ -245,21 +275,45 @@ mod tests {
     #[test]
     fn test_limit_argument_controls_top_n() {
         let cli =
-            Cli::try_parse_from(["build-time-insight", "analyze", "src", "--limit", "5"]).unwrap();
-        assert_eq!(analyze_args(&cli).limit(), 5);
+            Cli::try_parse_from(["build-time-insight", "report", "Cargo.toml", "--limit", "5"])
+                .unwrap();
+        assert_eq!(report_args(&cli).limit(), 5);
     }
 
     #[test]
     fn test_limit_defaults_to_ten() {
-        let cli = Cli::try_parse_from(["build-time-insight", "analyze", "src"]).unwrap();
-        assert_eq!(analyze_args(&cli).limit(), 10);
+        let cli = Cli::try_parse_from(["build-time-insight", "report", "Cargo.toml"]).unwrap();
+        assert_eq!(report_args(&cli).limit(), 10);
     }
 
     #[test]
     fn test_limit_rejects_zero() {
-        let err = Cli::try_parse_from(["build-time-insight", "analyze", "src", "--limit", "0"])
-            .unwrap_err();
+        let err =
+            Cli::try_parse_from(["build-time-insight", "report", "Cargo.toml", "--limit", "0"])
+                .unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+    }
+
+    #[test]
+    fn test_report_command_parses_file_and_json() {
+        let cli = Cli::try_parse_from([
+            "build-time-insight",
+            "report",
+            "Cargo.toml",
+            "--json",
+            "/tmp/summary.json",
+        ])
+        .unwrap();
+        let args = report_args(&cli);
+        assert_eq!(args.report, PathBuf::from("Cargo.toml"));
+        assert_eq!(args.json, Some(PathBuf::from("/tmp/summary.json")));
+    }
+
+    #[test]
+    fn test_report_missing_file_returns_error() {
+        let err = Cli::try_parse_from(["build-time-insight", "report", "/no/such/report.bin"])
+            .unwrap_err();
+        assert!(err.to_string().contains("does not exist"));
     }
 
     #[test]
@@ -296,13 +350,8 @@ mod tests {
 
     #[test]
     fn test_compare_accepts_two_reports() {
-        let cli = Cli::try_parse_from([
-            "build-time-insight",
-            "compare",
-            "base.bin",
-            "target.bin",
-        ])
-        .unwrap();
+        let cli = Cli::try_parse_from(["build-time-insight", "compare", "base.bin", "target.bin"])
+            .unwrap();
         let args = match &cli.command {
             Command::Compare(args) => args,
             _ => panic!("expected Compare subcommand"),

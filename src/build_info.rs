@@ -9,7 +9,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 /// Describes a build tool.
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Tool {
     /// Name of the tool.
     pub name: String,
@@ -18,7 +18,7 @@ pub struct Tool {
 }
 
 /// Describes the build toolchain.
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Toolchain {
     /// Build system of the project (e.g. CMake).
     pub build_system: Option<Tool>,
@@ -33,7 +33,7 @@ pub struct Toolchain {
 }
 
 /// Describes the build information.
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct BuildInfo {
     /// Toolchain of the build.
     pub toolchain: Option<Toolchain>,
