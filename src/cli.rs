@@ -68,7 +68,7 @@ pub struct AnalyzeArgs {
 
     /// Largest number of headers and templates kept for each translation unit.
     /// Use 0 to keep all.
-    #[arg(long, default_value_t = 100)]
+    #[arg(long, default_value_t = 50)]
     pub max_per_unit: usize,
 
     /// Largest number of templates kept for the whole build. Use 0 to keep all.
