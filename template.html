@@ -1179,6 +1179,11 @@ Check your Browserslist config to be sure that your targets are set up correctly
             return path.split('/').pop();
         }
 
+        function ellipsize(text, max = 60) {
+            const str = String(text);
+            return str.length > max ? str.slice(0, max - 1).trimEnd() + '\u2026' : str;
+        }
+
         // Draws a chart on a canvas. It removes an existing chart on that
         // canvas first.
         function updateChart(canvasId, config) {
@@ -2037,10 +2042,11 @@ Check your Browserslist config to be sure that your targets are set up correctly
                 .map(([id, t, kind]) => {
                     const avg = t.num_instantiations > 0 ? Math.floor(t.total_duration / t.num_instantiations) : 0;
                     const pct = maxDuration > 0 ? Math.max(1, Math.round((t.total_duration / maxDuration) * 100)) : 0;
+                    const name = s(id);
                     return `
                 <tr class="border-b hover:bg-gray-100 cursor-pointer dark:hover:bg-gray-700 dark:border-gray-700" onclick="showTemplateDetail(this.dataset.template, this.dataset.kind)" data-template="${esc(id)}" data-kind="${esc(kind)}">
                     <td class="p-2">${kind}</td>
-                    <td class="p-2 break-all">${esc(s(id))}</td>
+                    <td class="p-2 break-all" title="${esc(name)}">${esc(ellipsize(name))}</td>
                     <td class="p-2">${durationBar(pct, fmtDuration(t.total_duration))}</td>
                     <td class="p-2">${fmtDuration(avg)}</td>
                     <td class="p-2">${t.num_instantiations}</td>
@@ -3539,6 +3545,39 @@ Check your Browserslist config to be sure that your targets are set up correctly
             return `<div class="mb-4 text-sm text-gray-500 dark:text-gray-400">${text}</div>`;
         }
 
+        function toggleTemplateName(btn) {
+            const el = document.getElementById('template-name');
+            if (!el) return;
+            const clamped = el.classList.toggle('line-clamp-2');
+            el.classList.toggle('text-xl', clamped);
+            el.classList.toggle('text-sm', !clamped);
+            el.classList.toggle('font-mono', !clamped);
+            btn.textContent = clamped ? 'Show full name' : 'Hide full name';
+        }
+
+        function copyTemplateName(btn) {
+            const el = document.getElementById('template-name');
+            if (!el) return;
+            const text = el.textContent;
+            const done = () => {
+                btn.textContent = 'Copied';
+                setTimeout(() => { btn.textContent = 'Copy name'; }, 1500);
+            };
+            if (navigator.clipboard && window.isSecureContext) {
+                navigator.clipboard.writeText(text).then(done).catch(() => {});
+                return;
+            }
+            const ta = document.createElement('textarea');
+            ta.value = text;
+            ta.style.position = 'fixed';
+            ta.style.opacity = '0';
+            document.body.appendChild(ta);
+            ta.select();
+            document.execCommand('copy');
+            ta.remove();
+            done();
+        }
+
         function detailTotalBar(totalText, barHtml) {
             return `<div class="flex flex-col md:flex-row gap-4 mb-4">
                 <div class="md:w-44 shrink-0">
@@ -3660,6 +3699,7 @@ Check your Browserslist config to be sure that your targets are set up correctly
             document.getElementById('detail-page').classList.remove('hidden');
 
             const name = s(templateId);
+            const isLongName = name.length > 80;
             const avg = t.num_instantiations > 0 ? Math.floor(t.total_duration / t.num_instantiations) : 0;
 
             const unitRows = Object.entries(reportData.analysis.unit_analysis || {})
@@ -3694,8 +3734,12 @@ Check your Browserslist config to be sure that your targets are set up correctly
                 : [];
 
             document.getElementById('detail-content').innerHTML = `
-                <h2 class="text-2xl font-bold mb-1 break-all">${esc(name)}</h2>
+                <h2 id="template-name" class="text-xl font-semibold mb-1 break-words ${isLongName ? 'line-clamp-2' : ''}">${esc(name)}</h2>
                 ${detailSubtitle(isClass ? 'class template' : 'function template')}
+                <div class="mb-4 flex flex-wrap items-center gap-2">
+                    ${isLongName ? `<button onclick="toggleTemplateName(this)" class="text-xs bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:bg-blue-100 hover:text-blue-700 dark:hover:bg-blue-900/40 dark:hover:text-blue-300 px-2 py-1 rounded">Show full name</button>` : ''}
+                    <button onclick="copyTemplateName(this)" class="text-xs bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300 hover:bg-blue-100 hover:text-blue-700 dark:hover:bg-blue-900/40 dark:hover:text-blue-300 px-2 py-1 rounded">Copy name</button>
+                </div>
                 ${detailTotalBar(fmtDuration(t.total_duration), tplParts.length ? stackBar(tplParts) : '')}
                 <div class="grid grid-cols-2 md:grid-cols-3 gap-2 mb-4 text-sm">
                     ${detailKpi('Instantiations', t.num_instantiations)}
@@ -3739,8 +3783,9 @@ Check your Browserslist config to be sure that your targets are set up correctly
                     .slice(0, 20)
                     .map(([tid, t]) => {
                         const share = u.total_duration > 0 ? (t.total_duration / u.total_duration) * 100 : 0;
-                        return `<tr class="border-b hover:bg-gray-100 cursor-pointer dark:hover:bg-gray-700 dark:border-gray-700" onclick="showTemplateDetail('${esc(tid)}', '${kind}')" data-s0="${esc(basename(s(tid)))}" data-s1="${t.total_duration}" data-s2="${t.num_instantiations}" data-s3="${share.toFixed(1)}">
-                            <td class="p-2 break-all">${esc(basename(s(tid)))}</td>
+                        const fullName = s(tid);
+                        return `<tr class="border-b hover:bg-gray-100 cursor-pointer dark:hover:bg-gray-700 dark:border-gray-700" onclick="showTemplateDetail('${esc(tid)}', '${kind}')" data-s0="${esc(fullName)}" data-s1="${t.total_duration}" data-s2="${t.num_instantiations}" data-s3="${share.toFixed(1)}">
+                            <td class="p-2 break-all" title="${esc(fullName)}">${esc(ellipsize(fullName))}</td>
                             <td class="p-2">${fmtDuration(t.total_duration)}</td>
                             <td class="p-2">${t.num_instantiations}</td>
                             <td class="p-2">${share.toFixed(1)}%</td>
