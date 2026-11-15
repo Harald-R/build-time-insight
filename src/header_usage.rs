@@ -9,7 +9,7 @@ use serde::de::{
 };
 use serde::{Deserialize, Serialize};
 
-/// How a translation unit uses a header it includes.
+/// How a translation unit uses a header it directly includes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum HeaderUsage {
     /// No symbol from the header is referenced; the `#include` can be removed.
@@ -229,9 +229,10 @@ fn shell_split(s: &str) -> Vec<String> {
 /// For each included header, how the translation unit uses it.
 ///
 /// This is a heuristic based on the clang `-ast-dump=json` output: a header is
-/// `NeedsDefinition` when the unit constructs a value of one of its classes or
-/// instantiates a template declared in it; `DeclarationOnly` when some symbol is
-/// referenced but no definition is needed; `Unused` when nothing is referenced.
+/// `NeedsDefinition` when the unit constructs a value of one of its classes,
+/// accesses one of its members, or instantiates a template declared in it;
+/// `DeclarationOnly` when some symbol is referenced but no definition is
+/// needed; `Unused` when nothing is referenced.
 pub fn header_usage_from_ast(
     ast: &[u8],
     root: Option<&str>,
@@ -269,15 +270,22 @@ fn classify(summary: &Summary, source: &str, headers: &[String]) -> Vec<(String,
         .map(|header| {
             let classes = names_in(&summary.defined_classes, header);
             let functions = names_in(&summary.defined_functions, header);
+            let function_keys = names_in(&summary.defined_function_keys, header);
+            let source_definitions = names_in(&summary.source_function_definitions, source);
             let constructed = types_in(&summary.constructed_types, source);
+            let complete_type_uses = types_in(&summary.complete_type_uses, source);
             let referenced_types = types_in(&summary.referenced_types, source);
             let source_decls = names_in(&summary.referenced_decls, source);
             let instantiated = summary.instantiated_files.contains(header);
 
-            let needs_definition = instantiated || classes.iter().any(|c| constructed.contains(c));
+            let needs_definition = instantiated
+                || classes
+                    .iter()
+                    .any(|c| constructed.contains(c) || complete_type_uses.contains(c));
             let referenced = instantiated
                 || classes.iter().any(|c| referenced_types.contains(c))
-                || functions.iter().any(|f| source_decls.contains(f));
+                || functions.iter().any(|f| source_decls.contains(f))
+                || function_keys.iter().any(|f| source_definitions.contains(f));
 
             let usage = if needs_definition {
                 HeaderUsage::NeedsDefinition
@@ -296,9 +304,14 @@ fn classify(summary: &Summary, source: &str, headers: &[String]) -> Vec<(String,
 struct Summary {
     defined_classes: Vec<(String, String)>,   // (file, class name)
     defined_functions: Vec<(String, String)>, // (file, function name)
-    referenced_types: Vec<(String, String)>,  // (file, base type) type mentions in the source
+    defined_function_keys: Vec<(String, String)>, // (file, mangled name)
+    // Functions defined in the source, keyed by mangled name. A definition
+    // whose key matches a header declaration implements that declaration.
+    source_function_definitions: Vec<(String, String)>,
+    referenced_types: Vec<(String, String)>, // (file, base type) type mentions in the source
     constructed_types: Vec<(String, String)>, // (file, base type) constructed in the source
-    referenced_decls: Vec<(String, String)>,  // (file, name) DeclRefExpr in the source
+    complete_type_uses: Vec<(String, String)>, // (file, type) member access in the source
+    referenced_decls: Vec<(String, String)>, // (file, name) DeclRefExpr in the source
     instantiated_files: Vec<String>,
 }
 
@@ -308,10 +321,18 @@ struct LocInfo {
     file: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Default, Deserialize)]
 struct TypeInfo {
     #[serde(default, rename = "qualType")]
     qual_type: Option<String>,
+    #[serde(default, rename = "desugaredQualType")]
+    desugared_qual_type: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ReferencedDeclInfo {
+    #[serde(default)]
+    name: Option<String>,
 }
 
 /// Seed that deserializes one AST node into its `Summary` contribution,
@@ -325,9 +346,9 @@ struct NodeSeed<'a> {
 }
 
 impl<'de> DeserializeSeed<'de> for NodeSeed<'_> {
-    type Value = ();
+    type Value = Option<TypeInfo>;
 
-    fn deserialize<D>(self, deserializer: D) -> Result<(), D::Error>
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
     where
         D: de::Deserializer<'de>,
     {
@@ -350,20 +371,24 @@ struct NodeVisitor<'a> {
 }
 
 impl<'de> Visitor<'de> for NodeVisitor<'_> {
-    type Value = ();
+    type Value = Option<TypeInfo>;
 
     fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("an AST node object")
     }
 
-    fn visit_map<A>(self, mut map: A) -> Result<(), A::Error>
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
     where
         A: MapAccess<'de>,
     {
         let mut kind = String::new();
         let mut name: Option<String> = None;
+        let mut mangled_name: Option<String> = None;
         let mut own_file: Option<String> = None;
         let mut qual_type: Option<String> = None;
+        let mut desugared_qual_type: Option<String> = None;
+        let mut referenced_name: Option<String> = None;
+        let mut first_child_type: Option<TypeInfo> = None;
         let mut complete = false;
         let mut is_instantiation = false;
 
@@ -377,6 +402,7 @@ impl<'de> Visitor<'de> for NodeVisitor<'_> {
                     }
                 }
                 "name" => name = map.next_value::<Option<String>>()?,
+                "mangledName" => mangled_name = map.next_value::<Option<String>>()?,
                 "loc" => {
                     let loc = map.next_value::<LocInfo>()?;
                     own_file = loc.file;
@@ -384,6 +410,12 @@ impl<'de> Visitor<'de> for NodeVisitor<'_> {
                 "type" => {
                     let t = map.next_value::<TypeInfo>()?;
                     qual_type = t.qual_type;
+                    desugared_qual_type = t.desugared_qual_type;
+                }
+                "referencedDecl" => {
+                    referenced_name = map
+                        .next_value::<Option<ReferencedDeclInfo>>()?
+                        .and_then(|decl| decl.name);
                 }
                 "completeDefinition" => complete = map.next_value::<bool>()?,
                 "templateSpecializationKind" => {
@@ -401,13 +433,17 @@ impl<'de> Visitor<'de> for NodeVisitor<'_> {
                         .as_deref()
                         .is_none_or(|f| f == self.source || self.headers.iter().any(|h| h == f));
                     if relevant {
-                        map.next_value_seed(InnerSeed {
+                        let child_type = map.next_value_seed(InnerSeed {
                             summary: &mut *self.summary,
                             root: self.root,
                             source: self.source,
                             headers: self.headers,
                             inherited: node_file,
                         })?;
+                        // Remember the first child's type. For a member access
+                        // this is the object expression, whose type is the
+                        // class whose complete definition the access requires.
+                        first_child_type = child_type;
                     } else {
                         map.next_value::<IgnoredAny>()?;
                     }
@@ -427,7 +463,7 @@ impl<'de> Visitor<'de> for NodeVisitor<'_> {
         let in_source = file.as_deref() == Some(self.source);
         let kind = kind.as_str();
         let name_ref = name.as_deref().unwrap_or("");
-        let qual_ref = qual_type.as_deref().unwrap_or("");
+        let type_refs = [qual_type.as_deref(), desugared_qual_type.as_deref()];
 
         if let Some(file) = file.as_deref() {
             if (kind == "CXXRecordDecl" || kind == "RecordDecl")
@@ -439,13 +475,22 @@ impl<'de> Visitor<'de> for NodeVisitor<'_> {
                     .defined_classes
                     .push((file.to_string(), name_ref.to_string()));
             }
-            if (kind == "FunctionDecl" || kind == "CXXMethodDecl")
-                && in_headers
-                && !name_ref.is_empty()
-            {
+            let is_function = kind == "FunctionDecl" || kind == "CXXMethodDecl";
+            let function_key = mangled_name.as_deref().unwrap_or(name_ref);
+            if is_function && in_headers && !name_ref.is_empty() {
                 self.summary
                     .defined_functions
                     .push((file.to_string(), name_ref.to_string()));
+                if !function_key.is_empty() {
+                    self.summary
+                        .defined_function_keys
+                        .push((file.to_string(), function_key.to_string()));
+                }
+            }
+            if is_function && in_source && !function_key.is_empty() {
+                self.summary
+                    .source_function_definitions
+                    .push((file.to_string(), function_key.to_string()));
             }
             let is_constructed = matches!(
                 kind,
@@ -460,20 +505,44 @@ impl<'de> Visitor<'de> for NodeVisitor<'_> {
                     "VarDecl" | "ParmVarDecl" | "FieldDecl" | "DeclRefExpr"
                 );
             if in_source {
-                if is_constructed && !qual_ref.is_empty() {
-                    self.summary
-                        .constructed_types
-                        .push((file.to_string(), base_type_name(qual_ref)));
+                for type_ref in type_refs.into_iter().flatten() {
+                    for type_name in type_names(type_ref) {
+                        if is_constructed {
+                            self.summary
+                                .constructed_types
+                                .push((file.to_string(), type_name.clone()));
+                        }
+                        if is_type_mention {
+                            self.summary
+                                .referenced_types
+                                .push((file.to_string(), type_name));
+                        }
+                    }
                 }
-                if is_type_mention && !qual_ref.is_empty() {
-                    self.summary
-                        .referenced_types
-                        .push((file.to_string(), base_type_name(qual_ref)));
+                if kind == "DeclRefExpr" {
+                    // Clang's JSON dump puts the referenced declaration's name in
+                    // `referencedDecl`; the `DeclRefExpr` node itself has no
+                    // `name`. Keep falling back to `name` for hand-written ASTs.
+                    let referenced_name = referenced_name.as_deref().unwrap_or(name_ref);
+                    if !referenced_name.is_empty() {
+                        self.summary
+                            .referenced_decls
+                            .push((file.to_string(), referenced_name.to_string()));
+                    }
                 }
-                if kind == "DeclRefExpr" && !name_ref.is_empty() {
-                    self.summary
-                        .referenced_decls
-                        .push((file.to_string(), name_ref.to_string()));
+                if kind == "MemberExpr"
+                    && let Some(base_type) = first_child_type.as_ref()
+                    && let Some(type_ref) = base_type
+                        .qual_type
+                        .as_deref()
+                        .or(base_type.desugared_qual_type.as_deref())
+                {
+                    let base_name = base_type_name(type_ref);
+                    if !base_name.is_empty() {
+                        self.summary
+                            .complete_type_uses
+                            .push((file.to_string(), base_name));
+                    }
                 }
             }
             if (kind == "CXXRecordDecl" || kind == "FunctionDecl") && is_instantiation && in_headers
@@ -481,7 +550,14 @@ impl<'de> Visitor<'de> for NodeVisitor<'_> {
                 self.summary.instantiated_files.push(file.to_string());
             }
         }
-        Ok(())
+        if qual_type.is_some() || desugared_qual_type.is_some() {
+            Ok(Some(TypeInfo {
+                qual_type,
+                desugared_qual_type,
+            }))
+        } else {
+            Ok(None)
+        }
     }
 }
 
@@ -495,9 +571,9 @@ struct InnerSeed<'a> {
 }
 
 impl<'de> DeserializeSeed<'de> for InnerSeed<'_> {
-    type Value = ();
+    type Value = Option<TypeInfo>;
 
-    fn deserialize<D>(self, deserializer: D) -> Result<(), D::Error>
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
     where
         D: de::Deserializer<'de>,
     {
@@ -520,24 +596,31 @@ struct InnerVisitor<'a> {
 }
 
 impl<'de> Visitor<'de> for InnerVisitor<'_> {
-    type Value = ();
+    type Value = Option<TypeInfo>;
 
     fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("an inner AST node array")
     }
 
-    fn visit_seq<A>(self, mut seq: A) -> Result<(), A::Error>
+    fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
     where
         A: SeqAccess<'de>,
     {
-        while let Some(()) = seq.next_element_seed(NodeSeed {
+        let mut first = None;
+        let mut seen_first = false;
+        while let Some(value) = seq.next_element_seed(NodeSeed {
             summary: &mut *self.summary,
             root: self.root,
             source: self.source,
             headers: self.headers,
             inherited: self.inherited.clone(),
-        })? {}
-        Ok(())
+        })? {
+            if !seen_first {
+                seen_first = true;
+                first = value;
+            }
+        }
+        Ok(first)
     }
 }
 
@@ -554,26 +637,102 @@ fn normalize(root: Option<&str>, file: &str) -> String {
     }
 }
 
+/// Extract the class-like names mentioned in a clang type string.
+///
+/// Qualifiers, pointer/reference operators, elaborated-type keywords and
+/// namespace/class qualification prefixes are dropped, so `const Foo &`,
+/// `class Foo *` and `std::vector<Foo>` yield `Foo` (and `vector` for the
+/// latter). This also picks up types nested inside template arguments, which
+/// matters for headers only referenced through e.g. `std::vector<Foo>`.
+fn type_names(t: &str) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    let bytes = t.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i].is_ascii_alphabetic() || bytes[i] == b'_' {
+            let start = i;
+            i += 1;
+            while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
+                i += 1;
+            }
+            let ident = &t[start..i];
+            // A name immediately followed by `::` only qualifies the real type
+            // name (`std` in `std::vector`, `geom` in `geom::Foo`).
+            let mut next = i;
+            while next < bytes.len() && (bytes[next] as char).is_whitespace() {
+                next += 1;
+            }
+            if t.get(next..).is_some_and(|rest| rest.starts_with("::")) {
+                continue;
+            }
+            if !is_ignored_type_name(ident) && !names.iter().any(|n| n == ident) {
+                names.push(ident.to_string());
+            }
+        } else {
+            i += 1;
+        }
+    }
+    names
+}
+
+/// Type tokens that are keywords, qualifiers or built-in types rather than
+/// project symbols.
+fn is_ignored_type_name(name: &str) -> bool {
+    matches!(
+        name,
+        "auto"
+            | "bool"
+            | "char"
+            | "char8_t"
+            | "char16_t"
+            | "char32_t"
+            | "class"
+            | "const"
+            | "consteval"
+            | "constexpr"
+            | "constinit"
+            | "decltype"
+            | "double"
+            | "enum"
+            | "extern"
+            | "false"
+            | "float"
+            | "inline"
+            | "int"
+            | "long"
+            | "mutable"
+            | "noexcept"
+            | "nullptr"
+            | "operator"
+            | "register"
+            | "restrict"
+            | "short"
+            | "signed"
+            | "static"
+            | "struct"
+            | "template"
+            | "true"
+            | "typedef"
+            | "typename"
+            | "typeof"
+            | "union"
+            | "unsigned"
+            | "using"
+            | "void"
+            | "volatile"
+            | "wchar_t"
+            | "__restrict"
+            | "__restrict__"
+    )
+}
+
 /// Reduce a clang type string to its base class name, e.g. `class Foo *` -> `Foo`
 /// and `std::vector<int>` -> `vector`.
 fn base_type_name(t: &str) -> String {
-    let mut s = t.rsplit("::").next().unwrap_or(t).to_string();
-    for prefix in ["class ", "struct ", "enum ", "union "] {
-        if let Some(rest) = s.strip_prefix(prefix) {
-            s = rest.to_string();
-            break;
-        }
-    }
-    while s.starts_with('*') || s.starts_with('&') {
-        s.remove(0);
-    }
-    while s.ends_with('*') || s.ends_with('&') {
-        s.pop();
-    }
-    if let Some(i) = s.find('<') {
-        s.truncate(i);
-    }
-    s.trim().to_string()
+    type_names(t)
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| t.trim().to_string())
 }
 
 #[cfg(test)]
@@ -628,6 +787,134 @@ mod tests {
                 { "kind": "FunctionDecl", "name": "foo_size",
                   "loc": { "file": "src/foo.h", "line": 1, "col": 1 } },
                 { "kind": "DeclRefExpr", "name": "foo_size",
+                  "loc": { "file": "src/main.cpp", "line": 2, "col": 1 } }
+            ]
+        });
+        assert_eq!(
+            run(ast, "src/main.cpp", &["src/foo.h"]),
+            vec![("src/foo.h".to_string(), HeaderUsage::DeclarationOnly)]
+        );
+    }
+
+    #[test]
+    fn function_call_uses_referenced_decl_name() {
+        // Real clang JSON has no `name` on DeclRefExpr; the referenced
+        // declaration is nested under `referencedDecl`.
+        let ast = json!({
+            "kind": "TranslationUnitDecl",
+            "inner": [
+                { "kind": "FunctionDecl", "name": "foo_size",
+                  "loc": { "file": "src/foo.h", "line": 1, "col": 1 } },
+                { "kind": "DeclRefExpr",
+                  "type": { "qualType": "int ()" },
+                  "referencedDecl": { "kind": "FunctionDecl", "name": "foo_size" },
+                  "loc": { "file": "src/main.cpp", "line": 2, "col": 1 } }
+            ]
+        });
+        assert_eq!(
+            run(ast, "src/main.cpp", &["src/foo.h"]),
+            vec![("src/foo.h".to_string(), HeaderUsage::DeclarationOnly)]
+        );
+    }
+
+    #[test]
+    fn const_qualified_parameter_is_declaration_only() {
+        let ast = json!({
+            "kind": "TranslationUnitDecl",
+            "inner": [
+                { "kind": "CXXRecordDecl", "name": "Foo", "completeDefinition": true,
+                  "loc": { "file": "src/foo.h", "line": 1, "col": 1 } },
+                { "kind": "ParmVarDecl", "name": "p", "type": { "qualType": "const Foo &" },
+                  "loc": { "file": "src/main.cpp", "line": 2, "col": 1 } }
+            ]
+        });
+        assert_eq!(
+            run(ast, "src/main.cpp", &["src/foo.h"]),
+            vec![("src/foo.h".to_string(), HeaderUsage::DeclarationOnly)]
+        );
+    }
+
+    #[test]
+    fn const_qualified_construction_needs_definition() {
+        let ast = json!({
+            "kind": "TranslationUnitDecl",
+            "inner": [
+                { "kind": "CXXRecordDecl", "name": "Foo", "completeDefinition": true,
+                  "loc": { "file": "src/foo.h", "line": 1, "col": 1 } },
+                { "kind": "CXXConstructExpr", "type": { "qualType": "const Foo" },
+                  "loc": { "file": "src/main.cpp", "line": 2, "col": 1 } }
+            ]
+        });
+        assert_eq!(
+            run(ast, "src/main.cpp", &["src/foo.h"]),
+            vec![("src/foo.h".to_string(), HeaderUsage::NeedsDefinition)]
+        );
+    }
+
+    #[test]
+    fn member_access_needs_definition() {
+        let ast = json!({
+            "kind": "TranslationUnitDecl",
+            "inner": [
+                { "kind": "CXXRecordDecl", "name": "Foo", "completeDefinition": true,
+                  "loc": { "file": "src/foo.h", "line": 1, "col": 1 } },
+                { "kind": "MemberExpr", "name": "x", "type": { "qualType": "int" },
+                  "loc": { "file": "src/main.cpp", "line": 2, "col": 1 },
+                  "inner": [
+                      { "kind": "DeclRefExpr", "type": { "qualType": "const Foo" },
+                        "loc": { "file": "src/main.cpp", "line": 2, "col": 1 } }
+                  ] }
+            ]
+        });
+        assert_eq!(
+            run(ast, "src/main.cpp", &["src/foo.h"]),
+            vec![("src/foo.h".to_string(), HeaderUsage::NeedsDefinition)]
+        );
+    }
+
+    #[test]
+    fn definition_implements_header_declaration() {
+        let ast = json!({
+            "kind": "TranslationUnitDecl",
+            "inner": [
+                { "kind": "FunctionDecl", "name": "foo", "mangledName": "_Z3foov",
+                  "loc": { "file": "src/foo.h", "line": 1, "col": 1 } },
+                { "kind": "FunctionDecl", "name": "foo", "mangledName": "_Z3foov",
+                  "loc": { "file": "src/foo.cpp", "line": 1, "col": 1 } }
+            ]
+        });
+        assert_eq!(
+            run(ast, "src/foo.cpp", &["src/foo.h"]),
+            vec![("src/foo.h".to_string(), HeaderUsage::DeclarationOnly)]
+        );
+    }
+
+    #[test]
+    fn definition_with_different_mangled_name_does_not_match() {
+        let ast = json!({
+            "kind": "TranslationUnitDecl",
+            "inner": [
+                { "kind": "FunctionDecl", "name": "foo", "mangledName": "_Z3foov",
+                  "loc": { "file": "src/foo.h", "line": 1, "col": 1 } },
+                { "kind": "FunctionDecl", "name": "foo", "mangledName": "_ZN2ns3fooEv",
+                  "loc": { "file": "src/foo.cpp", "line": 1, "col": 1 } }
+            ]
+        });
+        assert_eq!(
+            run(ast, "src/foo.cpp", &["src/foo.h"]),
+            vec![("src/foo.h".to_string(), HeaderUsage::Unused)]
+        );
+    }
+
+    #[test]
+    fn template_argument_counts_as_type_reference() {
+        let ast = json!({
+            "kind": "TranslationUnitDecl",
+            "inner": [
+                { "kind": "CXXRecordDecl", "name": "Foo", "completeDefinition": true,
+                  "loc": { "file": "src/foo.h", "line": 1, "col": 1 } },
+                { "kind": "ParmVarDecl", "name": "p",
+                  "type": { "qualType": "const std::vector<Foo> &" },
                   "loc": { "file": "src/main.cpp", "line": 2, "col": 1 } }
             ]
         });
@@ -697,5 +984,19 @@ mod tests {
         assert_eq!(base_type_name("class Foo *"), "Foo");
         assert_eq!(base_type_name("std::vector<int>"), "vector");
         assert_eq!(base_type_name("Foo"), "Foo");
+        assert_eq!(base_type_name("const Foo &"), "Foo");
+        assert_eq!(base_type_name("const geom::Foo"), "Foo");
+        assert_eq!(base_type_name("Foo *const"), "Foo");
+        assert_eq!(base_type_name("const std::vector<Foo> &"), "vector");
+    }
+
+    #[test]
+    fn type_names_extracts_nested_and_skips_qualifiers() {
+        assert_eq!(
+            type_names("const std::vector<geom::Foo> &"),
+            vec!["vector".to_string(), "Foo".to_string()]
+        );
+        assert_eq!(type_names("unsigned long"), Vec::<String>::new());
+        assert_eq!(type_names("void (*)(const Foo &)"), vec!["Foo".to_string()]);
     }
 }

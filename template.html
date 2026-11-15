@@ -3655,6 +3655,7 @@ Check your Browserslist config to be sure that your targets are set up correctly
                 </tr>`).join('');
             const hasUsageData = Object.values(reportData.analysis.unit_analysis || {})
                 .some(u => Object.keys(u.header_usage || {}).length > 0);
+            const usageTotal = (h.unused_units || 0) + (h.forward_declarable_units || 0) + (h.definition_required_units || 0);
 
             const chainCount = h.inclusion_paths instanceof Map
                 ? h.inclusion_paths.size
@@ -3679,9 +3680,11 @@ Check your Browserslist config to be sure that your targets are set up correctly
                 </div>
                 ${detailSection('Units where this header is unused or forward-declarable',
                         hasUsageData
-                            ? (wasteRows
-                                ? detailTable('header-waste', [{ label: 'Unit', type: 'str' }, { label: 'Usage', type: 'str' }], wasteRows)
-                                : '<div class="text-gray-500 dark:text-gray-400">No units - this header is fully used everywhere it is included.</div>')
+                            ? (usageTotal === 0
+                                ? '<div class="text-gray-500 dark:text-gray-400">No direct-include usage data for this header.</div>'
+                                : (wasteRows
+                                    ? detailTable('header-waste', [{ label: 'Unit', type: 'str' }, { label: 'Usage', type: 'str' }], wasteRows)
+                                    : '<div class="text-gray-500 dark:text-gray-400">No units - this header is fully used everywhere it is directly included.</div>'))
                             : '<div class="text-amber-700 dark:text-amber-300">No header-usage data - rerun with <code>--header-usage</code> to get suggestions.</div>',
                         hasUsageData && usageWaste.length ? `${usageWaste.length} unit${usageWaste.length === 1 ? '' : 's'}` : '')}`;
             fitStackBar();

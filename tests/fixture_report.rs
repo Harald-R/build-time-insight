@@ -222,6 +222,20 @@ fn assert_header_usage(strings: &[String], result: &AnalysisResult) {
             header_id(strings, result, suffix).and_then(|hid| u.header_usage.get(&hid))
         };
 
+        // Only direct includes can be removed from this unit. A transitive
+        // header must never be classified as unused/forward-declarable here.
+        for hid in u.header_usage.keys() {
+            let direct = u
+                .header_inclusion_paths
+                .get(hid)
+                .is_none_or(|paths| paths.keys().any(|chain| chain.is_empty()));
+            assert!(
+                direct,
+                "unit '{name}' classifies transitive header '{}'",
+                resolve(strings, *hid)
+            );
+        }
+
         // edge_unused.cpp includes unused.h but uses nothing from it.
         if name.ends_with("/edge_unused.cpp")
             && let Some(usage) = usage_of("include/unused.h")
@@ -242,15 +256,57 @@ fn assert_header_usage(strings: &[String], result: &AnalysisResult) {
                 "fwd_class.h in edge_needs.cpp expected NeedsDefinition, got {usage:?}"
             );
         }
-        // vector3.h is a class template instantiated in the units that build
-        // Vector3<double>: those must require its definition.
-        if name.ends_with("/main.cpp")
-            && let Some(usage) = usage_of("include/vector3.h")
+        // shapes.cpp accesses Sphere::radius and Box::min/max, so it needs the
+        // definitions from shapes.h rather than just forward declarations.
+        if name.ends_with("/shapes.cpp")
+            && let Some(usage) = usage_of("include/shapes.h")
         {
             assert_eq!(
                 usage,
                 &HeaderUsage::NeedsDefinition,
-                "vector3.h in main.cpp expected NeedsDefinition, got {usage:?}"
+                "shapes.h in shapes.cpp expected NeedsDefinition, got {usage:?}"
+            );
+        }
+        // shapes.cpp only includes shapes.h directly. geometry.h and vector3.h
+        // are reached through it and must not be classified for this unit.
+        if name.ends_with("/shapes.cpp") {
+            assert!(
+                usage_of("include/geometry.h").is_none(),
+                "geometry.h is transitive in shapes.cpp and must not be classified"
+            );
+            assert!(
+                usage_of("include/vector3.h").is_none(),
+                "vector3.h is transitive in shapes.cpp and must not be classified"
+            );
+        }
+        // main.cpp calls centroid() declared in geometry.h.
+        if name.ends_with("/main.cpp")
+            && let Some(usage) = usage_of("include/geometry.h")
+        {
+            assert_ne!(
+                usage,
+                &HeaderUsage::Unused,
+                "geometry.h in main.cpp is used but was classified Unused"
+            );
+        }
+        // geometry.cpp defines the functions declared in geometry.h.
+        if name.ends_with("/geometry.cpp")
+            && let Some(usage) = usage_of("include/geometry.h")
+        {
+            assert_eq!(
+                usage,
+                &HeaderUsage::DeclarationOnly,
+                "geometry.h in geometry.cpp expected DeclarationOnly, got {usage:?}"
+            );
+        }
+        // edge_diamond.cpp constructs DiamondA.
+        if name.ends_with("/edge_diamond.cpp")
+            && let Some(usage) = usage_of("include/diamond_a.h")
+        {
+            assert_ne!(
+                usage,
+                &HeaderUsage::Unused,
+                "diamond_a.h in edge_diamond.cpp is used but was classified Unused"
             );
         }
     }

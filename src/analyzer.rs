@@ -42,7 +42,10 @@ pub struct UnitAnalysis {
     /// The chain is stored as the prefix of includers only (the header itself is
     /// the map key); the header's own name is not repeated in its chain.
     pub header_inclusion_paths: BTreeMap<StringId, BTreeMap<Vec<StringId>, i64>>,
-    /// Usage type of each included header.
+    /// Usage type of each header directly included by this unit.
+    ///
+    /// Transitively included headers are not classified: their `#include` is
+    /// not in this translation unit, so "unused" would not be actionable here.
     #[serde(serialize_with = "crate::report::serialize_sorted_map")]
     pub header_usage: HashMap<StringId, crate::header_usage::HeaderUsage>,
     /// Duration and count per function template instantiation.
@@ -120,11 +123,11 @@ pub struct HeaderAnalysis {
     pub parse_duration: i64,
     /// Number of times the header was included.
     pub num_inclusions: i64,
-    /// Units where the header was included but nothing from it was used.
+    /// Units that directly included the header but used nothing from it.
     pub unused_units: usize,
-    /// Units where the header was only needed for declarations.
+    /// Units that directly included the header and only needed declarations.
     pub forward_declarable_units: usize,
-    /// Units where the header's definition was required.
+    /// Units that directly included the header and required its definitions.
     pub definition_required_units: usize,
     /// Number of inclusions per inclusion chain.
     pub inclusion_paths: BTreeMap<Vec<StringId>, i64>,
@@ -317,6 +320,18 @@ fn is_source_file(path: &str) -> bool {
     .any(|ext| lower.ends_with(ext))
 }
 
+/// Returns whether `header` is included directly by the unit's source file.
+///
+/// Direct includes have an empty prefix in `header_inclusion_paths`. When no
+/// inclusion data is available (e.g. a trace without `Source` events), assume
+/// the header is direct so usage analysis still runs.
+fn is_directly_included(unit: &UnitAnalysis, header: StringId) -> bool {
+    match unit.header_inclusion_paths.get(&header) {
+        Some(paths) => paths.keys().any(|chain| chain.is_empty()),
+        None => true,
+    }
+}
+
 fn lock(interner: &Mutex<Interner>) -> MutexGuard<'_, Interner> {
     interner
         .lock()
@@ -497,9 +512,12 @@ pub fn analyze_unit(trace: &FileTrace, interner: &Mutex<Interner>) -> (StringId,
     // Clang emits a "Source" span (cat = "Source") for every entered file,
     // nested inside the file that includes it. The chain from the root down
     // to a header's "Source" node is therefore its full inclusion path.
-    // The top-level source file is dropped so that the same header-only
-    // chain (e.g. "a.h -> b.h") recurs across translation units and can be
-    // counted as the most-used inclusion chain for the header.
+    //
+    // Clang sometimes omits a "Source" span for the translation unit itself,
+    // in which case the roots are already the headers included directly by it.
+    // Drop the source file only when it actually is the first chain element;
+    // otherwise a direct header would be dropped and its children would look
+    // like direct includes.
     if let Some(source_root_ids) = trace.trace_tree.roots.get(SOURCE) {
         let mut stack: Vec<(usize, Vec<String>)> =
             source_root_ids.iter().map(|&id| (id, Vec::new())).collect();
@@ -513,10 +531,13 @@ pub fn analyze_unit(trace: &FileTrace, interner: &Mutex<Interner>) -> (StringId,
                 .map(|f| f.split(':').next().unwrap_or(f).to_string());
             if let Some(file) = file {
                 chain.push(file.clone());
-                if !is_source_file(&file) && chain.len() > 1 {
+                if !is_source_file(&file) {
                     // Prefix chain: everything between the top-level source file
-                    // and this header, so the header's own name is not repeated.
-                    let prefix = chain[1..chain.len() - 1].to_vec();
+                    // (when present) and this header, so the header's own name is
+                    // not repeated. A direct include therefore has an empty prefix.
+                    let prefix_start =
+                        usize::from(chain.first().is_some_and(|f| is_source_file(f)));
+                    let prefix = chain[prefix_start..chain.len() - 1].to_vec();
                     let header_id = intern_path(interner, &file);
                     let chain_ids: Vec<StringId> =
                         prefix.iter().map(|s| intern_path(interner, s)).collect();
@@ -641,6 +662,7 @@ pub fn analyze_build_dir(
                     let headers: Vec<String> = unit
                         .header_parse_duration
                         .keys()
+                        .filter(|h| is_directly_included(&unit, **h))
                         .map(|h| lock(shared).resolve(*h).to_string())
                         .filter(|h| !h.starts_with('/'))
                         .collect();
@@ -1365,6 +1387,37 @@ mod tests {
         );
         // b.h is included via a.h, so its chain stores the prefix [a.h]
         assert_eq!(unit.header_inclusion_paths[&b_h][&vec![a_h]], 1);
+
+        assert!(is_directly_included(&unit, a_h));
+        assert!(!is_directly_included(&unit, b_h));
+        // Headers without inclusion data are treated as direct.
+        let unknown = intern(&interner, "lib/unknown.h");
+        assert!(is_directly_included(&unit, unknown));
+    }
+
+    #[test]
+    fn analyze_inclusion_paths_without_source_span() {
+        // Clang sometimes omits a Source span for the translation unit itself.
+        // The root Source nodes are then the directly included headers.
+        let trace = file_trace(
+            Some("src/main.cpp"),
+            vec![
+                source_begin(1, 1, 100, "lib/a.h:10:2"),
+                source_begin(1, 1, 120, "lib/b.h:5:1"),
+                source_end(1, 1, 250),
+                source_end(1, 1, 300),
+            ],
+        );
+        let (interner, _, unit) = analyze_unit_with(trace);
+        let a_h = intern(&interner, "lib/a.h");
+        let b_h = intern(&interner, "lib/b.h");
+        assert_eq!(
+            unit.header_inclusion_paths[&a_h][&Vec::<StringId>::new()],
+            1
+        );
+        assert_eq!(unit.header_inclusion_paths[&b_h][&vec![a_h]], 1);
+        assert!(is_directly_included(&unit, a_h));
+        assert!(!is_directly_included(&unit, b_h));
     }
 
     #[test]
