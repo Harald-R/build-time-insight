@@ -54,6 +54,10 @@ pub struct UnitAnalysis {
     /// Duration and count per class template instantiation.
     #[serde(serialize_with = "crate::report::serialize_sorted_map")]
     pub class_template_instantiations: HashMap<StringId, TemplateInstantiation>,
+    /// Project headers providing symbols used by this unit that are only
+    /// transitively included.
+    #[serde(default)]
+    pub missing_includes: Vec<StringId>,
 }
 
 /// Stores the duration and count for one template instantiation.
@@ -426,6 +430,7 @@ pub fn analyze_unit(trace: &FileTrace, interner: &Mutex<Interner>) -> (StringId,
         header_usage: HashMap::new(),
         function_template_instantiations: HashMap::new(),
         class_template_instantiations: HashMap::new(),
+        missing_includes: Vec::new(),
     };
     // Extract header parse durations from the "Source" tree. Clang emits a "Source"
     // span for every entered file; every non-source file is a header, including
@@ -701,13 +706,20 @@ pub fn analyze_build_dir(
                 }
                 if header_usage {
                     let source = lock(shared).resolve(unit_id).to_string();
-                    for (header, usage) in crate::header_usage::analyze_unit_header_usage(
+                    let usage = crate::header_usage::analyze_unit_header_usage(
                         &source,
                         root_ref,
                         compile_commands_ref,
-                    ) {
+                    );
+                    for (header, usage) in usage.usage {
                         let header_id = lock(shared).intern(&header);
                         unit.header_usage.insert(header_id, usage);
+                    }
+                    let mut missing = usage.missing_includes;
+                    missing.sort_unstable();
+                    missing.dedup();
+                    for header in missing {
+                        unit.missing_includes.push(lock(shared).intern(&header));
                     }
                 }
                 Some((unit_id, unit))
@@ -786,6 +798,7 @@ fn finalize(interner: &Mutex<Interner>, root: Option<String>, result: AnalysisRe
                 .into_iter()
                 .map(|(n, t)| (remap_id(n), t))
                 .collect();
+            ua.missing_includes = ua.missing_includes.into_iter().map(remap_id).collect();
             (remap_id(id), ua)
         })
         .collect();
@@ -938,6 +951,7 @@ mod tests {
             header_usage: HashMap::new(),
             function_template_instantiations: HashMap::new(),
             class_template_instantiations: HashMap::new(),
+            missing_includes: Vec::new(),
         }
     }
 

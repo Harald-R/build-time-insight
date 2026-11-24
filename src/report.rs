@@ -232,6 +232,9 @@ fn collect_used_strings(analysis: &AnalysisResult, used: &mut [bool]) {
         for header in unit.header_usage.keys() {
             mark(used, *header);
         }
+        for header in &unit.missing_includes {
+            mark(used, *header);
+        }
         for template in unit.function_template_instantiations.keys() {
             mark(used, *template);
         }
@@ -287,6 +290,7 @@ fn remap_analysis(analysis: &mut AnalysisResult, remap: &[u32]) {
                 .into_iter()
                 .map(|(k, v)| (remap_id(k), v))
                 .collect();
+            unit.missing_includes = unit.missing_includes.into_iter().map(remap_id).collect();
             unit.function_template_instantiations =
                 remap_map(unit.function_template_instantiations);
             unit.class_template_instantiations = remap_map(unit.class_template_instantiations);
@@ -398,6 +402,7 @@ mod tests {
             header_usage: HashMap::new(),
             function_template_instantiations: HashMap::new(),
             class_template_instantiations: HashMap::new(),
+            missing_includes: Vec::new(),
         };
         unit.header_inclusion_paths
             .insert(a_h, BTreeMap::from([(vec![z_h], 3)]));
@@ -415,6 +420,7 @@ mod tests {
                 header_usage: HashMap::new(),
                 function_template_instantiations: HashMap::new(),
                 class_template_instantiations: HashMap::new(),
+                missing_includes: Vec::new(),
             },
         );
         Report::new(strings, BuildInfo::default(), AnalysisResult::from(units))
@@ -521,6 +527,7 @@ mod tests {
                     header_usage: HashMap::new(),
                     function_template_instantiations: HashMap::new(),
                     class_template_instantiations: HashMap::new(),
+                    missing_includes: Vec::new(),
                 },
             );
         }
@@ -546,6 +553,7 @@ mod tests {
             header_usage: HashMap::new(),
             function_template_instantiations: HashMap::new(),
             class_template_instantiations: HashMap::new(),
+            missing_includes: Vec::new(),
         };
         for i in 0..20 {
             unit.header_parse_duration

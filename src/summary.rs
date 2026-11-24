@@ -4,6 +4,7 @@
 //! interned string ids with their labels so it can be printed or serialized
 //! to JSON.
 
+use std::collections::HashMap;
 use std::fmt;
 
 use serde::{Serialize, Serializer};
@@ -62,6 +63,7 @@ pub struct ReportSummary {
     pub units: Vec<UnitSummary>,
     pub largest_templates: Vec<TemplateSummary>,
     pub header_usage: Vec<HeaderUsageSummary>,
+    pub missing_includes: Vec<MissingIncludeSummary>,
 }
 
 /// Build-wide totals, mirroring the overview donut.
@@ -115,6 +117,7 @@ pub struct UnitSummary {
     pub largest_class: Option<TemplateSummary>,
     pub header_parse: Vec<HeaderTime>,
     pub header_usage: Vec<HeaderUsageEntry>,
+    pub missing_includes: Vec<String>,
 }
 
 /// A header's parse time within one translation unit.
@@ -142,6 +145,13 @@ pub struct TemplateSummary {
     pub total_seconds: Seconds,
     pub num_instantiations: i64,
     pub avg_seconds: Seconds,
+}
+
+/// A header that one or more units should include directly.
+#[derive(Debug, Serialize)]
+pub struct MissingIncludeSummary {
+    pub header: String,
+    pub unit_count: usize,
 }
 
 /// How a header is used across the build.
@@ -323,10 +333,36 @@ impl ReportSummary {
                         .map(|(id, inst)| per_unit_template(id, inst)),
                     header_parse,
                     header_usage,
+                    missing_includes: {
+                        let mut missing: Vec<String> = unit
+                            .missing_includes
+                            .iter()
+                            .map(|id| report.resolve(*id).to_string())
+                            .collect();
+                        missing.sort();
+                        missing.dedup();
+                        missing
+                    },
                 }
             })
             .collect();
         units.sort_by(|a, b| a.unit.cmp(&b.unit));
+
+        let mut missing_counts: HashMap<String, usize> = HashMap::new();
+        for unit in &units {
+            for header in &unit.missing_includes {
+                *missing_counts.entry(header.clone()).or_default() += 1;
+            }
+        }
+        let mut missing_includes: Vec<MissingIncludeSummary> = missing_counts
+            .into_iter()
+            .map(|(header, unit_count)| MissingIncludeSummary { header, unit_count })
+            .collect();
+        missing_includes.sort_by(|a, b| {
+            b.unit_count
+                .cmp(&a.unit_count)
+                .then_with(|| a.header.cmp(&b.header))
+        });
 
         let totals = Totals {
             total_seconds: to_seconds(total_duration),
@@ -423,6 +459,7 @@ impl ReportSummary {
             units,
             largest_templates,
             header_usage,
+            missing_includes,
         }
     }
 
@@ -451,6 +488,8 @@ impl ReportSummary {
         self.print_largest_templates();
 
         self.print_header_usage();
+
+        self.print_missing_includes();
 
         self.print_per_unit(limit);
     }
@@ -548,6 +587,25 @@ impl ReportSummary {
         }
     }
 
+    fn print_missing_includes(&self) {
+        println!();
+        print_section(&format!(
+            "Missing direct includes ({})",
+            self.missing_includes.len()
+        ));
+        if self.missing_includes.is_empty() {
+            println!("  (none)");
+            return;
+        }
+        for header in &self.missing_includes {
+            println!(
+                "  {}: {} -> add direct #include",
+                plural(header.unit_count as i64, "unit", "units"),
+                header.header
+            );
+        }
+    }
+
     fn print_per_unit(&self, limit: usize) {
         println!();
         let shown = limit.min(self.units.len());
@@ -606,6 +664,12 @@ impl ReportSummary {
                     println!("    {}: {}", header.header, header.usage);
                 }
             }
+            if !unit.missing_includes.is_empty() {
+                println!(
+                    "  add direct includes: {}",
+                    unit.missing_includes.join(", ")
+                );
+            }
         }
     }
 }
@@ -646,6 +710,7 @@ mod tests {
             header_usage: HashMap::new(),
             function_template_instantiations: HashMap::new(),
             class_template_instantiations: HashMap::new(),
+            missing_includes: Vec::new(),
         };
         unit.function_template_instantiations.insert(
             id(&strings, "my_template"),

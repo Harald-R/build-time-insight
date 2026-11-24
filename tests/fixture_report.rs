@@ -338,6 +338,36 @@ fn assert_header_usage(strings: &[String], result: &AnalysisResult) {
         );
     }
 
+    // Missing direct includes: Vector3 is used directly but only included
+    // transitively through geometry.h/shapes.h.
+    let vector3 = header_id(strings, result, "include/vector3.h").expect("vector3.h header");
+    for unit_suffix in ["/main.cpp", "/geometry.cpp", "/edge/edge_unused.cpp"] {
+        let unit = result
+            .unit_analysis
+            .iter()
+            .find(|(id, _)| resolve(strings, **id).ends_with(unit_suffix))
+            .unwrap_or_else(|| panic!("missing unit '{unit_suffix}'"))
+            .1;
+        assert!(
+            unit.missing_includes.contains(&vector3),
+            "unit '{unit_suffix}' should be told to include vector3.h directly"
+        );
+    }
+    for (uid, unit) in &result.unit_analysis {
+        let name = resolve(strings, *uid);
+        for id in &unit.missing_includes {
+            assert!(
+                !unit.header_usage.contains_key(id),
+                "unit '{name}' lists '{}' as missing but already includes it directly",
+                resolve(strings, *id)
+            );
+            assert!(
+                !resolve(strings, *id).starts_with('/'),
+                "unit '{name}' suggests a system header"
+            );
+        }
+    }
+
     // shapes.cpp only includes shapes.h directly. geometry.h and vector3.h are
     // reached through it and must not be classified for this unit.
     let shapes = result

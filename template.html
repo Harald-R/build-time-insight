@@ -1054,6 +1054,7 @@ Check your Browserslist config to be sure that your targets are set up correctly
                 header_usage: raw[6],
                 function_template_instantiations: hydrateMap(raw[7], hydrateTemplate),
                 class_template_instantiations: hydrateMap(raw[8], hydrateTemplate),
+                missing_includes: (raw[9] || []).map(String),
             };
         }
 
@@ -2290,22 +2291,38 @@ Check your Browserslist config to be sure that your targets are set up correctly
                 ? (a, b) => b.savingsDecl - a.savingsDecl
                 : (a, b) => b.decl - a.decl);
 
-            if (!entries.length) {
+            // Headers that are used but only included transitively
+            const missingMap = new Map();
+            for (const [uid, u] of Object.entries((reportData && reportData.analysis.unit_analysis) || {})) {
+                for (const hid of u.missing_includes || []) {
+                    let entry = missingMap.get(hid);
+                    if (!entry) {
+                        entry = { id: hid, name: s(hid), units: [] };
+                        missingMap.set(hid, entry);
+                    }
+                    entry.units.push(uid);
+                }
+            }
+            const missing = [...missingMap.values()].sort((a, b) =>
+                b.units.length - a.units.length || a.name.localeCompare(b.name));
+
+            if (!entries.length && !missing.length) {
                 el.innerHTML = '<div class="text-amber-700 dark:text-amber-300">No header-usage data - rerun with <code>--header-usage</code> to get suggestions.</div>';
                 summary.textContent = '';
                 return;
             }
-            if (!remove.length && !fwd.length) {
-                el.innerHTML = '<div class="text-green-700 dark:text-green-300">No redundant includes detected - every included header is used as-is.</div>';
+            if (!remove.length && !fwd.length && !missing.length) {
+                el.innerHTML = '<div class="text-green-700 dark:text-green-300">No include problems detected - every included header is used directly.</div>';
                 summary.textContent = '';
                 return;
             }
 
             const totalSavings = [...remove.map(e => e.savingsUnused), ...fwd.map(e => e.savingsDecl)].reduce((a, b) => a + b, 0);
             summary.innerHTML =
-                `<span class="font-medium">${remove.length}</span> removable includes and ` +
-                `<span class="font-medium">${fwd.length}</span> forward-declarable headers - ` +
-                `potential saving &asymp; <span class="font-medium">${fmtDuration(totalSavings)}</span> of parse time.`;
+                `<span class="font-medium">${remove.length}</span> removable includes, ` +
+                `<span class="font-medium">${fwd.length}</span> forward-declarable headers, and ` +
+                `<span class="font-medium">${missing.length}</span> missing direct includes. ` +
+                `Removal/forward-declaration saving &asymp; <span class="font-medium">${fmtDuration(totalSavings)}</span>.`;
 
             function suggestionRow(e, kind, color) {
                 const affected = kind === 'unused' ? e.unused : e.decl;
@@ -2333,8 +2350,33 @@ Check your Browserslist config to be sure that your targets are set up correctly
                     `<div class="space-y-1.5">${rows}</div></div>`;
             }
 
+            function missingRow(e) {
+                const units = e.units.map(uid =>
+                    `<button class="block w-full text-left px-2 py-1 rounded hover:bg-gray-100 dark:hover:bg-gray-700 text-xs break-all" onclick="showUnitDetail('${esc(uid)}')">${esc(s(uid))}</button>`
+                ).join('');
+                return `
+                <div class="suggestion-item rounded border border-gray-200 dark:border-gray-700">
+                    <details>
+                        <summary class="flex items-center gap-2 px-2 py-1.5 cursor-pointer hover:bg-gray-100 dark:hover:bg-gray-700">
+                            <span class="font-medium text-blue-600 dark:text-blue-400 shrink-0">${esc(basename(e.name))}</span>
+                            <span class="text-gray-500 dark:text-gray-400 text-xs truncate">${esc(e.name)}</span>
+                            <span class="text-xs text-gray-500 dark:text-gray-400 whitespace-nowrap">${e.units.length} unit${e.units.length === 1 ? '' : 's'} &middot; add direct #include</span>
+                        </summary>
+                        <div class="pl-6 pr-2 pb-1.5 space-y-0.5">${units}</div>
+                    </details>
+                </div>`;
+            }
+
+            function missingGroup(items) {
+                if (!items.length) return '';
+                const rows = items.map(missingRow).join('');
+                return `<div class="mb-4"><h3 class="text-lg font-semibold mb-2">Add these direct #includes (${items.length})</h3>` +
+                    `<div class="space-y-1.5">${rows}</div></div>`;
+            }
+
             el.innerHTML = group(remove, 'unused', 'text-red-600', 'Remove these #includes') +
-                group(fwd, 'decl', 'text-amber-600', 'Replace with forward declarations');
+                group(fwd, 'decl', 'text-amber-600', 'Replace with forward declarations') +
+                missingGroup(missing);
         }
 
         // Expands a suggestion. It shows the units where the include is unused
@@ -3652,6 +3694,15 @@ Check your Browserslist config to be sure that your targets are set up correctly
                 })
                 .filter(Boolean)
                 .sort((a, b) => (a.kind === 'Unused' ? 0 : 1) - (b.kind === 'Unused' ? 0 : 1));
+            const missingUnits = Object.entries(reportData.analysis.unit_analysis || {})
+                .filter(([, u]) => (u.missing_includes || []).includes(headerId))
+                .map(([uid]) => uid)
+                .sort((a, b) => s(a).localeCompare(s(b)));
+            const missingRows = missingUnits.map(uid =>
+                `<tr class="border-b hover:bg-gray-100 cursor-pointer dark:hover:bg-gray-700 dark:border-gray-700" onclick="showUnitDetail('${esc(uid)}')" data-s0="${esc(s(uid))}" data-s1="add direct #include">
+                    <td class="p-2 break-all">${esc(s(uid))}</td>
+                    <td class="p-2"><span class="inline-block bg-blue-100 text-blue-700 px-2 py-0.5 rounded text-xs font-medium dark:bg-blue-900/40 dark:text-blue-300">add direct #include</span></td>
+                </tr>`).join('');
             const wasteRows = usageWaste.map(({ uid, kind }) =>
                 `<tr class="border-b hover:bg-gray-100 cursor-pointer dark:hover:bg-gray-700 dark:border-gray-700" onclick="showUnitDetail('${esc(uid)}')" data-s0="${esc(s(uid))}" data-s1="${kind}">
                     <td class="p-2 break-all">${esc(s(uid))}</td>
@@ -3690,7 +3741,12 @@ Check your Browserslist config to be sure that your targets are set up correctly
                                     ? detailTable('header-waste', [{ label: 'Unit', type: 'str' }, { label: 'Usage', type: 'str' }], wasteRows)
                                     : '<div class="text-gray-500 dark:text-gray-400">No units - this header is fully used everywhere it is directly included.</div>'))
                             : '<div class="text-amber-700 dark:text-amber-300">No header-usage data - rerun with <code>--header-usage</code> to get suggestions.</div>',
-                        hasUsageData && usageWaste.length ? `${usageWaste.length} unit${usageWaste.length === 1 ? '' : 's'}` : '')}`;
+                        hasUsageData && usageWaste.length ? `${usageWaste.length} unit${usageWaste.length === 1 ? '' : 's'}` : '')}
+                ${detailSection('Units that should include this header directly',
+                        missingRows
+                            ? detailTable('header-missing', [{ label: 'Unit', type: 'str' }, { label: 'Action', type: 'str' }], missingRows)
+                            : '<div class="text-gray-500 dark:text-gray-400">No units - this header is included directly wherever it is used.</div>',
+                        missingUnits.length ? `${missingUnits.length} unit${missingUnits.length === 1 ? '' : 's'}` : '')}`;
             fitStackBar();
         }
 
@@ -3814,6 +3870,13 @@ Check your Browserslist config to be sure that your targets are set up correctly
                     </tr>`)
                 .join('');
             const hasUsage = Object.keys(u.header_usage || {}).length > 0;
+            const missingList = (u.missing_includes || [])
+                .map(hid =>
+                    `<tr class="border-b hover:bg-gray-100 cursor-pointer dark:hover:bg-gray-700 dark:border-gray-700" onclick="showHeaderDetail('${esc(hid)}')" data-s0="${esc(basename(s(hid)))}" data-s1="add direct #include">
+                        <td class="p-2 break-all">${esc(basename(s(hid)))}</td>
+                        <td class="p-2"><span class="inline-block bg-blue-100 text-blue-700 px-2 py-0.5 rounded text-xs font-medium dark:bg-blue-900/40 dark:text-blue-300">add direct #include</span></td>
+                    </tr>`)
+                .join('');
 
             document.getElementById('detail-content').innerHTML = `
                 <h2 class="text-2xl font-bold mb-1 break-all">${esc(name)}</h2>
@@ -3824,6 +3887,7 @@ Check your Browserslist config to be sure that your targets are set up correctly
                 { v: Math.max(0, (u.total_duration || 0) - (u.frontend_duration || 0) - (u.backend_duration || 0)), cls: 'bg-gray-400', label: 'Other', textCls: 'text-gray-900' },
             ]))}
                 ${hasUsage ? detailSection('Header usage in this unit', detailTable('unit-usage', [{ label: 'Header', type: 'str' }, { label: 'Usage', type: 'str' }], headerUsage, 'max-h-72')) : ''}
+                ${missingList ? detailSection('Missing direct includes', detailTable('unit-missing', [{ label: 'Header', type: 'str' }, { label: 'Action', type: 'str' }], missingList, 'max-h-48')) : ''}
                 <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
                     <div>${detailSection('Longest headers to parse', headerList
                 ? detailTable('unit-headers', [{ label: 'Header', type: 'str' }, { label: 'Parse time', type: 'num', default: true }, { label: 'Share', type: 'num' }], headerList)

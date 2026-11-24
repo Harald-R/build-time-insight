@@ -7,7 +7,7 @@
 //! references needs the definition (construction, member access,
 //! inline/function-template body, template instantiation, and so on).
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::io::{BufReader, Cursor, Read};
 use std::path::Path;
@@ -30,8 +30,19 @@ pub enum HeaderUsage {
     NeedsDefinition,
 }
 
+/// How one translation unit uses its headers.
+#[derive(Debug, Default)]
+pub struct UnitHeaderUsage {
+    /// Directly included project headers and their usage.
+    pub usage: Vec<(String, HeaderUsage)>,
+    /// Project headers providing used symbols that are only transitively
+    /// included.
+    pub missing_includes: Vec<String>,
+}
+
 /// Run clang on a single translation unit and return, for each directly
-/// included project header, how the unit uses it.
+/// included project header, how the unit uses it, plus any project headers
+/// that should be included directly.
 ///
 /// Direct includes are obtained from the compiler's `-H` output, using the
 /// compiler and flags recorded in `compile_commands.json`. The resulting paths
@@ -41,23 +52,29 @@ pub fn analyze_unit_header_usage(
     source: &str,
     root: Option<&str>,
     compile_commands: &Option<CompileCommands>,
-) -> Vec<(String, HeaderUsage)> {
+) -> UnitHeaderUsage {
     let invocation = Invocation::for_source(source, root, compile_commands);
     let headers = invocation.direct_includes(root);
     if headers.is_empty() {
-        return Vec::new();
+        return UnitHeaderUsage::default();
     }
-    let Some((mut child, summary)) = invocation.dump_ast(root, &headers) else {
-        return Vec::new();
+    let Some((mut child, summary)) = invocation.dump_ast(root) else {
+        return UnitHeaderUsage::default();
     };
     let success = child.wait().ok().is_some_and(|s| s.success());
     if !success {
         log::debug!("header usage: AST dump for {} failed", invocation.source);
-        return Vec::new();
+        return UnitHeaderUsage::default();
     }
-    let usage = classify(&summary, &headers);
-    log::debug!("header usage for {}: {usage:?}", invocation.source);
-    usage
+    let (usage, missing_includes) = classify(&summary, &headers, source);
+    log::debug!(
+        "header usage for {}: usage={usage:?}, missing={missing_includes:?}",
+        invocation.source
+    );
+    UnitHeaderUsage {
+        usage,
+        missing_includes,
+    }
 }
 
 /// Compile commands for the build, loaded from `compile_commands.json` in the
@@ -221,7 +238,7 @@ impl Invocation {
     /// Spawn clang and stream its `-ast-dump=json` stdout into a compact
     /// `Summary`. The (potentially hundreds of MB) dump is consumed
     /// incrementally and never materialized in memory.
-    fn dump_ast(&self, root: Option<&str>, headers: &[String]) -> Option<(Child, Summary)> {
+    fn dump_ast(&self, root: Option<&str>) -> Option<(Child, Summary)> {
         let mut cmd = Command::new(&self.compiler);
         cmd.current_dir(&self.directory);
         cmd.args(&self.flags);
@@ -259,7 +276,6 @@ impl Invocation {
             summary: &mut summary,
             root,
             source: &source,
-            headers,
             inherited: None,
         });
         Some((child, summary))
@@ -357,16 +373,24 @@ pub fn header_usage_from_ast(
     source: &str,
     headers: &[String],
 ) -> Vec<(String, HeaderUsage)> {
+    analyze_ast(ast, root, source, headers).0
+}
+
+fn analyze_ast(
+    ast: &[u8],
+    root: Option<&str>,
+    source: &str,
+    headers: &[String],
+) -> (Vec<(String, HeaderUsage)>, Vec<String>) {
     let mut de = serde_json::Deserializer::from_slice(ast);
     let mut summary = Summary::default();
     let _ = de.deserialize_any(NodeVisitor {
         summary: &mut summary,
         root,
         source,
-        headers,
         inherited: None,
     });
-    classify(&summary, headers)
+    classify(&summary, headers, source)
 }
 
 /// Compact data extracted from the AST dump.
@@ -375,15 +399,15 @@ struct Summary {
     /// Last file name written by clang's JSON dumper. Clang omits `loc.file`
     /// when it is unchanged, so this restores the omitted file.
     last_file: Option<String>,
-    /// Declarations in the source or a directly included header, by AST id.
+    /// Declarations in the source or a project header, by AST id.
     decls: HashMap<String, DeclInfo>,
-    /// Class/alias names declared in directly included headers.
+    /// Class/alias names declared in project headers.
     header_types: HashMap<String, Vec<String>>,
-    /// Class names *defined* in directly included headers.
+    /// Class names *defined* in project headers.
     header_type_definitions: HashMap<String, Vec<String>>,
-    /// All declaration names declared in directly included headers.
+    /// All declaration names declared in project headers.
     header_symbols: HashMap<String, Vec<String>>,
-    /// Names defined (not merely declared) in directly included headers.
+    /// Names defined (not merely declared) in project headers.
     header_definitions: HashMap<String, Vec<String>>,
     /// Function keys (mangled name when available) declared in headers.
     header_function_keys: HashMap<String, String>,
@@ -509,7 +533,6 @@ struct NodeSeed<'a> {
     summary: &'a mut Summary,
     root: Option<&'a str>,
     source: &'a str,
-    headers: &'a [String],
     inherited: Option<String>,
 }
 
@@ -524,7 +547,6 @@ impl<'de> DeserializeSeed<'de> for NodeSeed<'_> {
             summary: self.summary,
             root: self.root,
             source: self.source,
-            headers: self.headers,
             inherited: self.inherited,
         })
     }
@@ -534,7 +556,6 @@ struct NodeVisitor<'a> {
     summary: &'a mut Summary,
     root: Option<&'a str>,
     source: &'a str,
-    headers: &'a [String],
     inherited: Option<String>,
 }
 
@@ -611,14 +632,13 @@ impl<'de> Visitor<'de> for NodeVisitor<'_> {
                     let normalized = current_file.as_deref().map(|f| normalize(self.root, f));
                     let relevant = normalized
                         .as_deref()
-                        .is_none_or(|f| f == self.source || self.headers.iter().any(|h| h == f));
+                        .is_none_or(|f| f == self.source || !f.starts_with('/'));
                     if relevant {
                         let inherited = current_file;
                         inner_info = map.next_value_seed(InnerSeed {
                             summary: &mut *self.summary,
                             root: self.root,
                             source: self.source,
-                            headers: self.headers,
                             inherited,
                         })?;
                     } else {
@@ -644,16 +664,19 @@ impl<'de> Visitor<'de> for NodeVisitor<'_> {
 
         let in_source = use_file.as_deref() == Some(self.source);
         let declared_in_source = decl_file.as_deref() == Some(self.source);
-        let in_headers = decl_file
+        // Project headers are stored relative to the root. This includes
+        // transitive headers, so they can be suggested as missing direct
+        // includes when their symbols are used.
+        let is_project_header = decl_file
             .as_deref()
-            .is_some_and(|f| self.headers.iter().any(|h| h == f));
+            .is_some_and(|f| !f.starts_with('/') && f != self.source);
 
-        // A macro expanded in the source whose definition lives in a direct
+        // A macro expanded in the source whose definition lives in a project
         // header is a use of that header.
         if loc.as_ref().is_some_and(|l| l.is_macro)
             && in_source
             && let Some(file) = &decl_file
-            && in_headers
+            && is_project_header
         {
             self.summary.macro_refs.push(file.clone());
         }
@@ -670,7 +693,7 @@ impl<'de> Visitor<'de> for NodeVisitor<'_> {
         let function_key = mangled_name.as_deref().unwrap_or(name_ref);
 
         if kind_ref.ends_with("Decl")
-            && (declared_in_source || in_headers)
+            && (declared_in_source || is_project_header)
             && let Some(decl_id) = &id
             && !name_ref.is_empty()
         {
@@ -683,7 +706,7 @@ impl<'de> Visitor<'de> for NodeVisitor<'_> {
             );
         }
 
-        if in_headers
+        if is_project_header
             && !name_ref.is_empty()
             && matches!(
                 decl_kind,
@@ -851,7 +874,6 @@ struct InnerSeed<'a> {
     summary: &'a mut Summary,
     root: Option<&'a str>,
     source: &'a str,
-    headers: &'a [String],
     inherited: Option<String>,
 }
 
@@ -866,7 +888,6 @@ impl<'de> DeserializeSeed<'de> for InnerSeed<'_> {
             summary: self.summary,
             root: self.root,
             source: self.source,
-            headers: self.headers,
             inherited: self.inherited,
         })
     }
@@ -876,7 +897,6 @@ struct InnerVisitor<'a> {
     summary: &'a mut Summary,
     root: Option<&'a str>,
     source: &'a str,
-    headers: &'a [String],
     inherited: Option<String>,
 }
 
@@ -897,7 +917,6 @@ impl<'de> Visitor<'de> for InnerVisitor<'_> {
             summary: &mut *self.summary,
             root: self.root,
             source: self.source,
-            headers: self.headers,
             inherited: self.inherited.clone(),
         })? {
             if !seen_first {
@@ -956,17 +975,22 @@ fn add_type_refs(
     }
 }
 
-fn classify(summary: &Summary, headers: &[String]) -> Vec<(String, HeaderUsage)> {
+fn classify(
+    summary: &Summary,
+    headers: &[String],
+    source: &str,
+) -> (Vec<(String, HeaderUsage)>, Vec<String>) {
+    let direct: HashSet<&str> = headers.iter().map(String::as_str).collect();
     let mut usage: HashMap<&str, HeaderUsage> = headers
         .iter()
         .map(|h| (h.as_str(), HeaderUsage::Unused))
         .collect();
+    let mut missing: BTreeSet<String> = BTreeSet::new();
 
     fn mark(usage: &mut HashMap<&str, HeaderUsage>, file: &str, needs_definition: bool) {
         let Some(slot) = usage.get_mut(file) else {
             return;
         };
-
         *slot = match (*slot, needs_definition) {
             (HeaderUsage::NeedsDefinition, _) => HeaderUsage::NeedsDefinition,
             (_, true) => HeaderUsage::NeedsDefinition,
@@ -975,49 +999,149 @@ fn classify(summary: &Summary, headers: &[String]) -> Vec<(String, HeaderUsage)>
         };
     }
 
+    fn record(
+        file: &str,
+        needs_definition: bool,
+        direct: &HashSet<&str>,
+        usage: &mut HashMap<&str, HeaderUsage>,
+        missing: &mut BTreeSet<String>,
+        source: &str,
+    ) {
+        if file.is_empty() || file == source || file.starts_with('/') {
+            return;
+        }
+        if direct.contains(file) {
+            mark(usage, file, needs_definition);
+        } else {
+            missing.insert(file.to_string());
+        }
+    }
+
+    // Applies a reference's provider candidates. A direct provider always wins
+    // for `DeclarationOnly`; a definition-requiring reference still reports a
+    // missing direct include when the only direct provider cannot supply the
+    // definition.
+    fn record_providers(
+        providers: &[(&str, bool)],
+        any_needs_definition: bool,
+        direct: &HashSet<&str>,
+        usage: &mut HashMap<&str, HeaderUsage>,
+        missing: &mut BTreeSet<String>,
+        source: &str,
+    ) {
+        let providers: Vec<(&str, bool)> = providers
+            .iter()
+            .copied()
+            .filter(|(file, _)| !file.is_empty() && *file != source && !file.starts_with('/'))
+            .collect();
+        if providers.is_empty() {
+            return;
+        }
+        let has_direct = providers.iter().any(|(file, _)| direct.contains(file));
+        if has_direct {
+            for (file, needs_definition) in &providers {
+                if direct.contains(file) {
+                    mark(usage, file, *needs_definition);
+                }
+            }
+            if any_needs_definition
+                && !providers
+                    .iter()
+                    .any(|(file, needs)| direct.contains(file) && *needs)
+            {
+                for (file, needs) in &providers {
+                    if *needs && !direct.contains(file) {
+                        missing.insert(file.to_string());
+                    }
+                }
+            }
+        } else {
+            let has_definition = providers.iter().any(|(_, needs)| *needs);
+            for (file, needs) in &providers {
+                if any_needs_definition && has_definition && !*needs {
+                    continue;
+                }
+                missing.insert(file.to_string());
+            }
+        }
+    }
+
     for reference in &summary.decl_refs {
-        if let Some(info) = reference.id.as_ref().and_then(|id| summary.decls.get(id)) {
-            if !info.file.is_empty() {
-                mark(&mut usage, &info.file, info.is_definition);
+        if let Some(id) = &reference.id {
+            if let Some(info) = summary.decls.get(id) {
+                record(
+                    &info.file,
+                    info.is_definition,
+                    &direct,
+                    &mut usage,
+                    &mut missing,
+                    source,
+                );
             }
             continue;
         }
         // Fallback for ASTs without declaration ids (and for synthetic tests).
         if let Some(files) = summary.header_symbols.get(&reference.name) {
             let definitions = summary.header_definitions.get(&reference.name);
-            for file in files {
-                let needs_definition =
-                    definitions.is_some_and(|files| files.iter().any(|f| f == file));
-                mark(&mut usage, file, needs_definition);
-            }
+            let providers: Vec<(&str, bool)> = files
+                .iter()
+                .map(|file| {
+                    (
+                        file.as_str(),
+                        definitions.is_some_and(|files| files.iter().any(|f| f == file)),
+                    )
+                })
+                .collect();
+            let any_needs_definition = providers.iter().any(|(_, needs)| *needs);
+            record_providers(
+                &providers,
+                any_needs_definition,
+                &direct,
+                &mut usage,
+                &mut missing,
+                source,
+            );
         }
     }
 
     for reference in &summary.type_refs {
         if let Some(files) = summary.header_types.get(&reference.name) {
             let definitions = summary.header_type_definitions.get(&reference.name);
-            for file in files {
-                let needs_definition = reference.needs_definition
-                    && definitions.is_some_and(|files| files.iter().any(|f| f == file));
-                mark(&mut usage, file, needs_definition);
-            }
+            let providers: Vec<(&str, bool)> = files
+                .iter()
+                .map(|file| {
+                    (
+                        file.as_str(),
+                        reference.needs_definition
+                            && definitions.is_some_and(|files| files.iter().any(|f| f == file)),
+                    )
+                })
+                .collect();
+            record_providers(
+                &providers,
+                reference.needs_definition,
+                &direct,
+                &mut usage,
+                &mut missing,
+                source,
+            );
         }
     }
 
     for key in &summary.source_function_definitions {
         if let Some(file) = summary.header_function_keys.get(key) {
-            mark(&mut usage, file, false);
+            record(file, false, &direct, &mut usage, &mut missing, source);
         }
     }
 
     for file in &summary.instantiated_files {
-        mark(&mut usage, file, true);
+        record(file, true, &direct, &mut usage, &mut missing, source);
     }
     for file in &summary.macro_refs {
-        mark(&mut usage, file, false);
+        record(file, false, &direct, &mut usage, &mut missing, source);
     }
 
-    headers
+    let usage = headers
         .iter()
         .map(|header| {
             (
@@ -1025,7 +1149,8 @@ fn classify(summary: &Summary, headers: &[String]) -> Vec<(String, HeaderUsage)>
                 *usage.get(header.as_str()).unwrap_or(&HeaderUsage::Unused),
             )
         })
-        .collect()
+        .collect();
+    (usage, missing.into_iter().collect())
 }
 
 /// Normalize a clang `loc.file` to the analysis form: relative to `root` for
@@ -1146,8 +1271,16 @@ mod tests {
     use serde_json::json;
 
     fn run(ast: serde_json::Value, source: &str, headers: &[&str]) -> Vec<(String, HeaderUsage)> {
+        run_with_missing(ast, source, headers).0
+    }
+
+    fn run_with_missing(
+        ast: serde_json::Value,
+        source: &str,
+        headers: &[&str],
+    ) -> (Vec<(String, HeaderUsage)>, Vec<String>) {
         let headers: Vec<String> = headers.iter().map(|s| s.to_string()).collect();
-        header_usage_from_ast(&ast.to_string().into_bytes(), None, source, &headers)
+        analyze_ast(&ast.to_string().into_bytes(), None, source, &headers)
     }
 
     #[test]
@@ -1519,5 +1652,108 @@ mod tests {
             run(ast, "src/main.cpp", &["src/macros.h"]),
             vec![("src/macros.h".to_string(), HeaderUsage::DeclarationOnly)]
         );
+    }
+
+    #[test]
+    fn transitive_type_is_a_missing_include() {
+        let ast = json!({
+            "kind": "TranslationUnitDecl",
+            "inner": [
+                { "kind": "CXXRecordDecl", "name": "Foo", "completeDefinition": true,
+                  "loc": { "file": "src/foo.h", "line": 1, "col": 1 } },
+                { "kind": "VarDecl", "name": "f", "type": { "qualType": "Foo" },
+                  "loc": { "file": "src/main.cpp", "line": 2, "col": 1 } }
+            ]
+        });
+        let (usage, missing) = run_with_missing(ast, "src/main.cpp", &["src/direct.h"]);
+        assert_eq!(
+            usage,
+            vec![("src/direct.h".to_string(), HeaderUsage::Unused)]
+        );
+        assert_eq!(missing, vec!["src/foo.h".to_string()]);
+    }
+
+    #[test]
+    fn direct_provider_is_not_a_missing_include() {
+        let ast = json!({
+            "kind": "TranslationUnitDecl",
+            "inner": [
+                { "kind": "CXXRecordDecl", "name": "Foo", "completeDefinition": true,
+                  "loc": { "file": "src/foo.h", "line": 1, "col": 1 } },
+                { "kind": "VarDecl", "name": "f", "type": { "qualType": "Foo" },
+                  "loc": { "file": "src/main.cpp", "line": 2, "col": 1 } }
+            ]
+        });
+        let (usage, missing) = run_with_missing(ast, "src/main.cpp", &["src/foo.h"]);
+        assert_eq!(
+            usage,
+            vec![("src/foo.h".to_string(), HeaderUsage::NeedsDefinition)]
+        );
+        assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn transitive_function_is_a_missing_include() {
+        let ast = json!({
+            "kind": "TranslationUnitDecl",
+            "inner": [
+                { "kind": "FunctionDecl", "id": "0x1", "name": "foo",
+                  "loc": { "file": "src/foo.h", "line": 1, "col": 1 } },
+                { "kind": "DeclRefExpr",
+                  "loc": { "file": "src/main.cpp", "line": 2, "col": 1 },
+                  "referencedDecl": { "id": "0x1", "kind": "FunctionDecl", "name": "foo" } }
+            ]
+        });
+        let (usage, missing) = run_with_missing(ast, "src/main.cpp", &["src/direct.h"]);
+        assert_eq!(
+            usage,
+            vec![("src/direct.h".to_string(), HeaderUsage::Unused)]
+        );
+        assert_eq!(missing, vec!["src/foo.h".to_string()]);
+    }
+
+    #[test]
+    fn direct_forward_declaration_satisfies_a_pointer_use() {
+        let ast = json!({
+            "kind": "TranslationUnitDecl",
+            "inner": [
+                { "kind": "CXXRecordDecl", "name": "Foo",
+                  "loc": { "file": "src/fwd.h", "line": 1, "col": 1 } },
+                { "kind": "CXXRecordDecl", "name": "Foo", "completeDefinition": true,
+                  "loc": { "file": "src/impl.h", "line": 1, "col": 1 } },
+                { "kind": "ParmVarDecl", "name": "p", "type": { "qualType": "Foo *" },
+                  "loc": { "file": "src/main.cpp", "line": 2, "col": 1 } }
+            ]
+        });
+        let (usage, missing) = run_with_missing(ast, "src/main.cpp", &["src/fwd.h"]);
+        assert_eq!(
+            usage,
+            vec![("src/fwd.h".to_string(), HeaderUsage::DeclarationOnly)]
+        );
+        assert!(
+            missing.is_empty(),
+            "definition header should not be suggested"
+        );
+    }
+
+    #[test]
+    fn direct_forward_declaration_does_not_satisfy_a_definition_use() {
+        let ast = json!({
+            "kind": "TranslationUnitDecl",
+            "inner": [
+                { "kind": "CXXRecordDecl", "name": "Foo",
+                  "loc": { "file": "src/fwd.h", "line": 1, "col": 1 } },
+                { "kind": "CXXRecordDecl", "name": "Foo", "completeDefinition": true,
+                  "loc": { "file": "src/impl.h", "line": 1, "col": 1 } },
+                { "kind": "VarDecl", "name": "f", "type": { "qualType": "Foo" },
+                  "loc": { "file": "src/main.cpp", "line": 2, "col": 1 } }
+            ]
+        });
+        let (usage, missing) = run_with_missing(ast, "src/main.cpp", &["src/fwd.h"]);
+        assert_eq!(
+            usage,
+            vec![("src/fwd.h".to_string(), HeaderUsage::DeclarationOnly)]
+        );
+        assert_eq!(missing, vec!["src/impl.h".to_string()]);
     }
 }
