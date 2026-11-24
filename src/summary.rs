@@ -4,6 +4,7 @@
 //! interned string ids with their labels so it can be printed or serialized
 //! to JSON.
 
+use std::collections::HashMap;
 use std::fmt;
 
 use serde::{Serialize, Serializer};
@@ -144,13 +145,35 @@ pub struct TemplateSummary {
     pub avg_seconds: Seconds,
 }
 
+/// A unit in which a header has a particular usage.
+#[derive(Debug, Serialize)]
+pub struct HeaderUsageUnit {
+    pub unit: String,
+    /// Parse time attributed to this header in this unit, when the trace
+    /// recorded it.
+    pub header_parse_seconds: Option<Seconds>,
+    /// Total compile duration of the unit, used to order units by impact.
+    pub unit_seconds: Seconds,
+}
+
 /// How a header is used across the build.
 #[derive(Debug, Serialize)]
 pub struct HeaderUsageSummary {
     pub header: String,
-    pub unused_units: usize,
-    pub forward_declarable_units: usize,
-    pub definition_required_units: usize,
+    pub unused_units: Vec<HeaderUsageUnit>,
+    pub forward_declarable_units: Vec<HeaderUsageUnit>,
+    pub definition_required_units: Vec<HeaderUsageUnit>,
+}
+
+fn sort_usage_units(units: &mut [HeaderUsageUnit]) {
+    units.sort_by(|a, b| {
+        let a_cost = a.header_parse_seconds.map_or(-1.0, |s| s.0);
+        let b_cost = b.header_parse_seconds.map_or(-1.0, |s| s.0);
+        b_cost
+            .total_cmp(&a_cost)
+            .then_with(|| b.unit_seconds.0.total_cmp(&a.unit_seconds.0))
+            .then_with(|| a.unit.cmp(&b.unit))
+    });
 }
 
 /// Converts a duration in microseconds to seconds.
@@ -393,26 +416,56 @@ impl ReportSummary {
             })
             .collect();
 
-        let mut header_usage: Vec<HeaderUsageSummary> = analysis
-            .header_analysis
-            .iter()
-            .filter(|(_, header)| {
-                header.unused_units
-                    + header.forward_declarable_units
-                    + header.definition_required_units
-                    > 0
-            })
-            .map(|(id, header)| HeaderUsageSummary {
-                header: report.resolve(*id).to_string(),
-                unused_units: header.unused_units,
-                forward_declarable_units: header.forward_declarable_units,
-                definition_required_units: header.definition_required_units,
+        #[derive(Default)]
+        struct UsageUnits {
+            unused: Vec<HeaderUsageUnit>,
+            forward_declarable: Vec<HeaderUsageUnit>,
+            definition_required: Vec<HeaderUsageUnit>,
+        }
+
+        let mut usage_by_header: HashMap<StringId, UsageUnits> = HashMap::new();
+        for (unit_id, unit) in &analysis.unit_analysis {
+            let unit_name = report.resolve(*unit_id).to_string();
+            let unit_seconds = to_seconds(unit.total_duration);
+            for (header_id, usage) in &unit.header_usage {
+                let entry = HeaderUsageUnit {
+                    unit: unit_name.clone(),
+                    header_parse_seconds: unit
+                        .header_parse_duration
+                        .get(header_id)
+                        .copied()
+                        .map(to_seconds),
+                    unit_seconds,
+                };
+                let units = usage_by_header.entry(*header_id).or_default();
+                match usage {
+                    HeaderUsage::Unused => units.unused.push(entry),
+                    HeaderUsage::DeclarationOnly => units.forward_declarable.push(entry),
+                    HeaderUsage::NeedsDefinition => units.definition_required.push(entry),
+                }
+            }
+        }
+
+        let mut header_usage: Vec<HeaderUsageSummary> = usage_by_header
+            .into_iter()
+            .map(|(header_id, mut units)| {
+                sort_usage_units(&mut units.unused);
+                sort_usage_units(&mut units.forward_declarable);
+                sort_usage_units(&mut units.definition_required);
+                HeaderUsageSummary {
+                    header: report.resolve(header_id).to_string(),
+                    unused_units: units.unused,
+                    forward_declarable_units: units.forward_declarable,
+                    definition_required_units: units.definition_required,
+                }
             })
             .collect();
         header_usage.sort_by(|a, b| {
-            let rank =
-                |h: &HeaderUsageSummary| h.definition_required_units + h.forward_declarable_units;
-            rank(b).cmp(&rank(a)).then_with(|| a.header.cmp(&b.header))
+            let actionable =
+                |h: &HeaderUsageSummary| h.unused_units.len() + h.forward_declarable_units.len();
+            actionable(b)
+                .cmp(&actionable(a))
+                .then_with(|| a.header.cmp(&b.header))
         });
 
         Self {
@@ -518,32 +571,88 @@ impl ReportSummary {
 
     fn print_header_usage(&self) {
         println!();
-        print_section(&format!("Header usage ({})", self.header_usage.len()));
+        let actionable_headers = self
+            .header_usage
+            .iter()
+            .filter(|h| !h.unused_units.is_empty() || !h.forward_declarable_units.is_empty())
+            .count();
+        print_section(&format!(
+            "Header usage ({} actionable headers)",
+            actionable_headers
+        ));
         if self.header_usage.is_empty() {
             println!("  (no header-usage data in this report)");
             return;
         }
-        for header in &self.header_usage {
-            if header.unused_units > 0 {
-                println!(
-                    "  {} unused: {} -> remove #include",
-                    plural(header.unused_units as i64, "unit", "units"),
-                    header.header
-                );
-            }
-            if header.forward_declarable_units > 0 {
-                println!(
-                    "  {} with declarations only: {} -> forward-declare used symbols and add direct includes for transitive types",
-                    plural(header.forward_declarable_units as i64, "unit", "units"),
-                    header.header
-                );
-            }
-            if header.definition_required_units > 0 {
-                println!(
-                    "  {} with definition required: {}",
-                    plural(header.definition_required_units as i64, "unit", "units"),
-                    header.header
-                );
+
+        if actionable_headers == 0 {
+            println!("  (no redundant includes detected - every included header is used as-is)");
+        } else {
+            self.print_usage_group("Remove these #includes", |h| &h.unused_units);
+            self.print_usage_group(
+                "Declarations only: forward-declare used symbols and add direct includes for transitive types",
+                |h| &h.forward_declarable_units,
+            );
+        }
+
+        let needs_headers = self
+            .header_usage
+            .iter()
+            .filter(|h| !h.definition_required_units.is_empty())
+            .count();
+        let needs_units: usize = self
+            .header_usage
+            .iter()
+            .map(|h| h.definition_required_units.len())
+            .sum();
+        if needs_units > 0 {
+            println!();
+            println!(
+                "  Needs definitions (informational): {}, {}",
+                plural(needs_headers as i64, "header", "headers"),
+                plural(needs_units as i64, "unit", "units")
+            );
+        }
+    }
+
+    fn print_usage_group<F>(&self, title: &str, units_of: F)
+    where
+        F: Fn(&HeaderUsageSummary) -> &[HeaderUsageUnit],
+    {
+        let mut headers: Vec<&HeaderUsageSummary> = self
+            .header_usage
+            .iter()
+            .filter(|h| !units_of(h).is_empty())
+            .collect();
+        if headers.is_empty() {
+            return;
+        }
+        headers.sort_by(|a, b| {
+            units_of(b)
+                .len()
+                .cmp(&units_of(a).len())
+                .then_with(|| a.header.cmp(&b.header))
+        });
+        let total_units: usize = headers.iter().map(|h| units_of(h).len()).sum();
+
+        println!();
+        println!(
+            "  {title} ({} headers, {})",
+            headers.len(),
+            plural(total_units as i64, "unit", "units")
+        );
+        for header in headers {
+            let units = units_of(header);
+            println!(
+                "    {}: {}",
+                plural(units.len() as i64, "unit", "units"),
+                header.header
+            );
+            for unit in units {
+                match unit.header_parse_seconds {
+                    Some(seconds) => println!("      {} ({seconds})", unit.unit),
+                    None => println!("      {}", unit.unit),
+                }
             }
         }
     }
@@ -735,5 +844,67 @@ mod tests {
         assert_eq!(Seconds(0.5).to_string(), "500.000 ms");
         assert_eq!(Seconds(0.0005).to_string(), "500 us");
         assert_eq!(Seconds(2.0).to_string(), "2.000 s");
+    }
+
+    #[test]
+    fn header_usage_groups_units_by_action() {
+        let mut strings = vec![
+            "a.cpp".to_string(),
+            "b.cpp".to_string(),
+            "geometry.h".to_string(),
+            "utils.h".to_string(),
+        ];
+        strings.sort();
+        let a_cpp = id(&strings, "a.cpp");
+        let b_cpp = id(&strings, "b.cpp");
+        let geometry = id(&strings, "geometry.h");
+        let utils = id(&strings, "utils.h");
+
+        let make_unit = |total: i64, geometry_parse: i64| UnitAnalysis {
+            total_duration: total,
+            frontend_duration: total,
+            backend_duration: 0,
+            template_instantiation_duration: 0,
+            header_parse_duration: HashMap::from([(geometry, geometry_parse)]),
+            header_inclusion_paths: BTreeMap::new(),
+            header_usage: HashMap::from([
+                (geometry, HeaderUsage::DeclarationOnly),
+                (utils, HeaderUsage::NeedsDefinition),
+            ]),
+            function_template_instantiations: HashMap::new(),
+            class_template_instantiations: HashMap::new(),
+        };
+        let mut a = make_unit(1_000_000, 100_000);
+        a.header_usage.insert(utils, HeaderUsage::Unused);
+        let b = make_unit(2_000_000, 200_000);
+
+        let report = Report::new(
+            strings,
+            BuildInfo::default(),
+            AnalysisResult::from(HashMap::from([(a_cpp, a), (b_cpp, b)])),
+        );
+        let summary = ReportSummary::from_report(&report, 10);
+
+        let geometry_summary = summary
+            .header_usage
+            .iter()
+            .find(|h| h.header == "geometry.h")
+            .unwrap();
+        assert_eq!(geometry_summary.forward_declarable_units.len(), 2);
+        assert_eq!(geometry_summary.forward_declarable_units[0].unit, "b.cpp");
+        assert_eq!(
+            geometry_summary.forward_declarable_units[0].header_parse_seconds,
+            Some(Seconds(0.2))
+        );
+
+        let utils_summary = summary
+            .header_usage
+            .iter()
+            .find(|h| h.header == "utils.h")
+            .unwrap();
+        assert_eq!(utils_summary.unused_units.len(), 1);
+        assert_eq!(utils_summary.unused_units[0].unit, "a.cpp");
+        assert_eq!(utils_summary.definition_required_units.len(), 1);
+        assert_eq!(utils_summary.definition_required_units[0].unit, "b.cpp");
     }
 }
