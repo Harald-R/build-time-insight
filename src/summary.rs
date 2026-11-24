@@ -187,6 +187,16 @@ fn percent(value: Seconds, total: Seconds) -> String {
     }
 }
 
+/// Formats a count with its noun in the right number.
+fn plural(count: i64, singular: &str, plural: &str) -> String {
+    format!("{count} {}", if count == 1 { singular } else { plural })
+}
+
+/// Formats a ranked row with the metric first: `duration (percent)  subject`.
+fn format_ranked_row(metric: Seconds, total: Seconds, subject: &str) -> String {
+    format!("{metric} ({})  {subject}", percent(metric, total))
+}
+
 /// Formats one tool as `name version`.
 fn format_tool(tool: &Tool) -> String {
     if tool.version.is_empty() {
@@ -442,13 +452,10 @@ impl ReportSummary {
             self.longest_units.len(),
             self.totals.unit_count
         ));
-        for (index, unit) in self.longest_units.iter().enumerate() {
+        for unit in &self.longest_units {
             println!(
-                "{}. {}: {} ({})",
-                index + 1,
-                unit.unit,
-                unit.total_seconds,
-                percent(unit.total_seconds, self.totals.total_seconds)
+                "{}",
+                format_ranked_row(unit.total_seconds, self.totals.total_seconds, &unit.unit)
             );
         }
     }
@@ -460,18 +467,17 @@ impl ReportSummary {
             self.longest_headers.len(),
             self.totals.header_count
         ));
-        for (index, header) in self.longest_headers.iter().enumerate() {
+        for header in &self.longest_headers {
             println!(
-                "{}. {}: {} ({}, included {} times, avg {}/inclusion)",
-                index + 1,
-                header.header,
+                "{} ({})  {} ({}, avg {})",
                 header.parse_seconds,
                 percent(header.parse_seconds, self.totals.total_seconds),
-                header.num_inclusions,
+                header.header,
+                plural(header.num_inclusions, "inclusion", "inclusions"),
                 header.avg_inclusion_seconds
             );
             for path in &header.inclusion_paths {
-                println!("   via {} ({} times)", path.chain.join(" -> "), path.count);
+                println!("   {}× via {}", path.count, path.chain.join(" -> "));
             }
         }
     }
@@ -483,15 +489,18 @@ impl ReportSummary {
             self.largest_templates.len(),
             self.totals.template_count
         ));
-        for (index, template) in self.largest_templates.iter().enumerate() {
+        for template in &self.largest_templates {
             println!(
-                "{}. {} template '{}': {} ({}, {} instantiations, avg {})",
-                index + 1,
-                template.kind.as_deref().unwrap_or(""),
-                template.name,
+                "{} ({})  {} template '{}' ({}, avg {})",
                 template.total_seconds,
                 percent(template.total_seconds, self.totals.total_seconds),
-                template.num_instantiations,
+                template.kind.as_deref().unwrap_or(""),
+                template.name,
+                plural(
+                    template.num_instantiations,
+                    "instantiation",
+                    "instantiations"
+                ),
                 template.avg_seconds
             );
         }
@@ -507,20 +516,23 @@ impl ReportSummary {
         for header in &self.header_usage {
             if header.unused_units > 0 {
                 println!(
-                    "  {}: unused in {} unit(s) -> remove #include",
-                    header.header, header.unused_units
+                    "  {} unused: {} -> remove #include",
+                    plural(header.unused_units as i64, "unit", "units"),
+                    header.header
                 );
             }
             if header.forward_declarable_units > 0 {
                 println!(
-                    "  {}: replace #include with forward declaration in {} unit(s)",
-                    header.header, header.forward_declarable_units
+                    "  {} forward-declarable: {} -> replace #include with forward declaration",
+                    plural(header.forward_declarable_units as i64, "unit", "units"),
+                    header.header
                 );
             }
             if header.definition_required_units > 0 {
                 println!(
-                    "  {}: needs definition in {} unit(s)",
-                    header.header, header.definition_required_units
+                    "  {} with definition required: {}",
+                    plural(header.definition_required_units as i64, "unit", "units"),
+                    header.header
                 );
             }
         }
@@ -547,10 +559,8 @@ impl ReportSummary {
                 println!();
             }
             println!(
-                "{}: {} ({})",
-                unit.unit,
-                unit.total_seconds,
-                percent(unit.total_seconds, self.totals.total_seconds)
+                "{}",
+                format_ranked_row(unit.total_seconds, self.totals.total_seconds, &unit.unit)
             );
             println!(
                 "  frontend {} | backend {} | other {} | template instantiation {}",
@@ -560,12 +570,12 @@ impl ReportSummary {
                 unit.template_instantiation_seconds
             );
             println!(
-                "  function template: {}",
-                format_template(unit.largest_function.as_ref())
+                "  {}",
+                format_template_line("function", unit.largest_function.as_ref())
             );
             println!(
-                "  class template: {}",
-                format_template(unit.largest_class.as_ref())
+                "  {}",
+                format_template_line("class", unit.largest_class.as_ref())
             );
             if !unit.header_parse.is_empty() {
                 let shown_headers = limit.min(unit.header_parse.len());
@@ -575,10 +585,8 @@ impl ReportSummary {
                 );
                 for header in &unit.header_parse[..shown_headers] {
                     println!(
-                        "    {}: {} ({})",
-                        header.header,
-                        header.seconds,
-                        percent(header.seconds, unit.total_seconds)
+                        "    {}",
+                        format_ranked_row(header.seconds, unit.total_seconds, &header.header)
                     );
                 }
             }
@@ -592,14 +600,17 @@ impl ReportSummary {
     }
 }
 
-/// Formats a per-unit template summary for the terminal.
-fn format_template(template: Option<&TemplateSummary>) -> String {
+/// Formats a per-unit template summary with the duration first.
+fn format_template_line(kind: &str, template: Option<&TemplateSummary>) -> String {
     match template {
         Some(t) => format!(
-            "{} ({}, {} instantiations, avg {})",
-            t.name, t.total_seconds, t.num_instantiations, t.avg_seconds
+            "{}  {kind} template '{}' ({}, avg {})",
+            t.total_seconds,
+            t.name,
+            plural(t.num_instantiations, "instantiation", "instantiations"),
+            t.avg_seconds
         ),
-        None => "none".to_string(),
+        None => format!("{kind} template: none"),
     }
 }
 
@@ -673,6 +684,29 @@ mod tests {
         let json = serde_json::to_value(&summary).unwrap();
         assert_eq!(json["totals"]["total_seconds"], 1.235);
         assert_eq!(json["totals"]["other_seconds"], 0.035);
+    }
+
+    #[test]
+    fn result_rows_put_the_metric_first() {
+        assert_eq!(plural(1, "inclusion", "inclusions"), "1 inclusion");
+        assert_eq!(plural(2, "inclusion", "inclusions"), "2 inclusions");
+        assert_eq!(
+            format_ranked_row(Seconds(0.214749), Seconds(1.0), "src/main.cpp"),
+            "214.749 ms (21.5%)  src/main.cpp"
+        );
+
+        let template = TemplateSummary {
+            kind: None,
+            name: "foo".to_string(),
+            total_seconds: Seconds(0.00126),
+            num_instantiations: 1,
+            avg_seconds: Seconds(0.00126),
+        };
+        assert_eq!(
+            format_template_line("function", Some(&template)),
+            "1.260 ms  function template 'foo' (1 instantiation, avg 1.260 ms)"
+        );
+        assert_eq!(format_template_line("class", None), "class template: none");
     }
 
     #[test]
