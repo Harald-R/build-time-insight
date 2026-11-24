@@ -60,8 +60,8 @@ pub struct AnalyzeArgs {
     #[arg(short, long)]
     pub exclude: Vec<String>,
 
-    /// Analyze which directly included headers are unused or could be replaced
-    /// by forward declarations.
+    /// Analyze which directly included headers are unused, only need
+    /// declarations, or require definitions.
     #[arg(long)]
     pub header_usage: bool,
 

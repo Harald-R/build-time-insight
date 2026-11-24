@@ -23,8 +23,9 @@ use serde::{Deserialize, Serialize};
 pub enum HeaderUsage {
     /// No symbol from the header is referenced; the `#include` can be removed.
     Unused,
-    /// Only declarations are used; the include can be replaced by a forward
-    /// declaration.
+    /// Only declarations are used. The include can be replaced by forward
+    /// declarations of the used symbols, but transitive types the unit uses
+    /// still need direct includes.
     DeclarationOnly,
     /// A definition-requiring use exists (construction / instantiation).
     NeedsDefinition,

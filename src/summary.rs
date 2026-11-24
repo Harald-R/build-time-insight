@@ -533,7 +533,7 @@ impl ReportSummary {
             }
             if header.forward_declarable_units > 0 {
                 println!(
-                    "  {} forward-declarable: {} -> replace #include with forward declaration",
+                    "  {} with declarations only: {} -> forward-declare used symbols and add direct includes for transitive types",
                     plural(header.forward_declarable_units as i64, "unit", "units"),
                     header.header
                 );

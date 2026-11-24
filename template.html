@@ -874,7 +874,7 @@ Check your Browserslist config to be sure that your targets are set up correctly
                                 n/a</span>
                             <span class="flex items-center gap-1.5"><span
                                     class="inline-block w-4 h-0.5 bg-amber-500 rounded"></span>
-                                forward-declarable</span>
+                                declarations only</span>
                             <span class="flex items-center gap-1.5"><span
                                     class="inline-block w-4 h-0.5 bg-red-500 rounded"></span> unused - remove
                                 include</span>
@@ -2011,7 +2011,7 @@ Check your Browserslist config to be sure that your targets are set up correctly
 
         // Draws a small stacked bar. It shows how each header is used across
         // units. The colors match the header-usage chart: red for unused, amber
-        // for forward-declarable, and green for needs definition.
+        // for declarations-only, and green for needs definition.
         function usageShareBar(h) {
             const unused = h.unused_units || 0;
             const decl = h.forward_declarable_units || 0;
@@ -2257,7 +2257,7 @@ Check your Browserslist config to be sure that your targets are set up correctly
 
         function usageBadge(kind) {
             if (kind === 'Unused') return '<span class="inline-block bg-red-100 text-red-700 px-2 py-0.5 rounded text-xs font-medium dark:bg-red-900/40 dark:text-red-300">unused - remove #include</span>';
-            if (kind === 'DeclarationOnly') return '<span class="inline-block bg-amber-100 text-amber-700 px-2 py-0.5 rounded text-xs font-medium dark:bg-amber-900/40 dark:text-amber-300">forward-declarable</span>';
+            if (kind === 'DeclarationOnly') return '<span class="inline-block bg-amber-100 text-amber-700 px-2 py-0.5 rounded text-xs font-medium dark:bg-amber-900/40 dark:text-amber-300" title="Forward-declare used symbols and add direct includes for transitive types">declarations only</span>';
             return '<span class="inline-block bg-green-100 text-green-700 px-2 py-0.5 rounded text-xs font-medium dark:bg-green-900/40 dark:text-green-300">needs definition</span>';
         }
 
@@ -2304,7 +2304,7 @@ Check your Browserslist config to be sure that your targets are set up correctly
             const totalSavings = [...remove.map(e => e.savingsUnused), ...fwd.map(e => e.savingsDecl)].reduce((a, b) => a + b, 0);
             summary.innerHTML =
                 `<span class="font-medium">${remove.length}</span> removable includes and ` +
-                `<span class="font-medium">${fwd.length}</span> forward-declarable headers - ` +
+                `<span class="font-medium">${fwd.length}</span> declarations-only headers - ` +
                 `potential saving &asymp; <span class="font-medium">${fmtDuration(totalSavings)}</span> of parse time.`;
 
             function suggestionRow(e, kind, color) {
@@ -2334,11 +2334,11 @@ Check your Browserslist config to be sure that your targets are set up correctly
             }
 
             el.innerHTML = group(remove, 'unused', 'text-red-600', 'Remove these #includes') +
-                group(fwd, 'decl', 'text-amber-600', 'Replace with forward declarations');
+                group(fwd, 'decl', 'text-amber-600', 'Declarations only: forward-declare used symbols and add direct includes for transitive types');
         }
 
         // Expands a suggestion. It shows the units where the include is unused
-        // or forward-declarable. Each unit links to its detail page.
+        // or declarations-only. Each unit links to its detail page.
         function toggleSuggestionUnits(headerId, kind) {
             const panel = document.getElementById('sug-units-' + headerId + '-' + kind);
             if (!panel) return;
@@ -3682,7 +3682,7 @@ Check your Browserslist config to be sure that your targets are set up correctly
                     ? detailTable('header-units', [{ label: 'Unit', type: 'str' }, { label: 'Parse time', type: 'num', default: true }, { label: 'Share', type: 'num' }], unitParses)
                     : '<div class="text-gray-500 dark:text-gray-400">None</div>')}</div>
                 </div>
-                ${detailSection('Units where this header is unused or forward-declarable',
+                ${detailSection('Units where this header is unused or only needs declarations',
                         hasUsageData
                             ? (usageTotal === 0
                                 ? '<div class="text-gray-500 dark:text-gray-400">No direct-include usage data for this header.</div>'
