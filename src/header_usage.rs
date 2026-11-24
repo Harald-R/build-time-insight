@@ -1,8 +1,17 @@
 //! Classifies how each translation unit uses its included headers.
+//!
+//! The compiler is asked for the real direct includes (`-H`), then the AST
+//! is walked to collect symbol references and map them back to the headers
+//! that provide those symbols. A header is `Unused` when nothing from it is
+//! referenced. A used header is `DeclarationOnly` unless one of its
+//! references needs the definition (construction, member access,
+//! inline/function-template body, template instantiation, and so on).
+
+use std::collections::HashMap;
 use std::fs;
 use std::io::{BufReader, Cursor, Read};
 use std::path::Path;
-use std::process::{Child, Stdio};
+use std::process::{Child, Command, Stdio};
 
 use serde::de::{
     self, DeserializeSeed, Deserializer as _, IgnoredAny, MapAccess, SeqAccess, Visitor,
@@ -21,23 +30,34 @@ pub enum HeaderUsage {
     NeedsDefinition,
 }
 
-/// Run clang on a single translation unit and return, for each included header,
-/// how the unit uses it. `headers` must be in the analysis's stored form
-/// (relative to the project root for project files, absolute for others).
+/// Run clang on a single translation unit and return, for each directly
+/// included project header, how the unit uses it.
+///
+/// Direct includes are obtained from the compiler's `-H` output, using the
+/// compiler and flags recorded in `compile_commands.json`. The resulting paths
+/// are in the analysis's stored form: relative to the project root for project
+/// files, absolute for others. Only project headers are classified.
 pub fn analyze_unit_header_usage(
     source: &str,
     root: Option<&str>,
-    headers: &[String],
     compile_commands: &Option<CompileCommands>,
 ) -> Vec<(String, HeaderUsage)> {
-    let Some((mut child, summary)) = dump_ast(source, root, headers, compile_commands) else {
+    let invocation = Invocation::for_source(source, root, compile_commands);
+    let headers = invocation.direct_includes(root);
+    if headers.is_empty() {
+        return Vec::new();
+    }
+    let Some((mut child, summary)) = invocation.dump_ast(root, &headers) else {
         return Vec::new();
     };
     let success = child.wait().ok().is_some_and(|s| s.success());
     if !success {
+        log::debug!("header usage: AST dump for {} failed", invocation.source);
         return Vec::new();
     }
-    classify(&summary, source, headers)
+    let usage = classify(&summary, &headers);
+    log::debug!("header usage for {}: {usage:?}", invocation.source);
+    usage
 }
 
 /// Compile commands for the build, loaded from `compile_commands.json` in the
@@ -78,34 +98,62 @@ struct CompileCommand {
     command: Option<String>,
 }
 
-/// Spawn clang and stream its `-ast-dump=json` stdout into a compact `Summary`.
-/// The (potentially hundreds of MB) dump is consumed incrementally and never
-/// materialized in memory. Returns the child process (to check its exit status)
-/// together with the extracted summary.
-fn dump_ast(
-    source: &str,
-    root: Option<&str>,
-    headers: &[String],
-    compile_commands: &Option<CompileCommands>,
-) -> Option<(Child, Summary)> {
-    let absolute_source = match root {
-        Some(r) => format!("{}/{}", r, source),
-        None => source.to_string(),
-    };
-
-    let (directory, flags) = if let Some(entry) = compile_commands
-        .as_ref()
-        .and_then(|cc| cc.for_source(&absolute_source))
-    {
-        // Use the recorded compile flags, dropping output/dependency options and
-        // the source file itself.
-        let argv = entry
-            .arguments
+impl CompileCommand {
+    fn argv(&self) -> Vec<String> {
+        self.arguments
             .clone()
-            .unwrap_or_else(|| shell_split(entry.command.as_deref().unwrap_or("")));
+            .unwrap_or_else(|| shell_split(self.command.as_deref().unwrap_or_default()))
+    }
+}
+
+/// One compiler invocation for a translation unit: the compiler, its working
+/// directory, and the compile flags without the source/output arguments.
+struct Invocation {
+    compiler: String,
+    directory: String,
+    flags: Vec<String>,
+    /// Absolute source path as passed to the compiler.
+    source: String,
+}
+
+impl Invocation {
+    fn for_source(
+        source: &str,
+        root: Option<&str>,
+        compile_commands: &Option<CompileCommands>,
+    ) -> Self {
+        let absolute_source = if Path::new(source).is_absolute() {
+            source.to_string()
+        } else {
+            match root {
+                Some(root) => format!("{root}/{source}"),
+                None => source.to_string(),
+            }
+        };
+
+        let Some(entry) = compile_commands
+            .as_ref()
+            .and_then(|cc| cc.for_source(&absolute_source))
+        else {
+            return Self {
+                compiler: std::env::var("CXX").unwrap_or_else(|_| "clang++".to_string()),
+                directory: root.unwrap_or_default().to_string(),
+                flags: vec!["-std=c++17".to_string()],
+                source: absolute_source,
+            };
+        };
+
+        // Keep the compiler (argv[0]) intact: it may be a wrapper that sets up
+        // include paths, a version manager shim, or ccache.
+        let mut argv = entry.argv().into_iter();
+        let compiler = argv
+            .next()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "clang++".to_string());
+
         let mut flags = Vec::new();
         let mut skip_next = false;
-        for arg in argv.into_iter().skip(1) {
+        for arg in argv {
             if skip_next {
                 skip_next = false;
                 continue;
@@ -133,60 +181,135 @@ fn dump_ast(
                 _ => flags.push(arg),
             }
         }
-        flags.push("-fsyntax-only".into());
-        flags.push("-Xclang".into());
-        flags.push("-ast-dump=json".into());
-        flags.push(absolute_source);
-        (entry.directory.clone(), flags)
-    } else {
-        // Fallback: best-effort compile with no extra flags.
-        let flags: Vec<String> = vec![
-            "-std=c++17".into(),
-            "-fsyntax-only".into(),
-            "-Xclang".into(),
-            "-ast-dump=json".into(),
-            source.into(),
-        ];
-        (root.unwrap_or("").to_string(), flags)
-    };
 
-    let mut cmd = std::process::Command::new("clang++");
-    cmd.current_dir(&directory);
-    cmd.args(&flags);
-    cmd.stdout(Stdio::piped()).stderr(Stdio::null());
-    let mut child = cmd.spawn().ok()?;
-    let stdout = child.stdout.take()?;
-    let mut reader = BufReader::new(stdout);
-
-    // Skip any diagnostics before the JSON document (which starts at the first
-    // '{'); on a clean compile there are none.
-    let mut prefix = Vec::new();
-    let mut byte = [0u8; 1];
-    loop {
-        if reader.read_exact(&mut byte).is_err() {
-            let _ = child.kill();
-            return None;
-        }
-        prefix.push(byte[0]);
-        if byte[0] == b'{' {
-            break;
-        }
-        if prefix.len() > 4096 {
-            let _ = child.kill();
-            return None;
+        Self {
+            compiler,
+            directory: entry.directory.clone(),
+            flags,
+            source: absolute_source,
         }
     }
-    let stream = Cursor::new(prefix).chain(reader);
-    let mut de = serde_json::Deserializer::from_reader(stream);
-    let mut summary = Summary::default();
-    let _ = de.deserialize_any(NodeVisitor {
-        summary: &mut summary,
-        root,
-        source,
-        headers,
-        inherited: None,
-    });
-    Some((child, summary))
+
+    /// Returns the project headers directly included by the source, in
+    /// analysis form (relative paths for project headers).
+    fn direct_includes(&self, root: Option<&str>) -> Vec<String> {
+        let mut cmd = Command::new(&self.compiler);
+        cmd.current_dir(&self.directory);
+        cmd.args(&self.flags);
+        cmd.args(["-E", "-H", &self.source]);
+        cmd.stdout(Stdio::null()).stderr(Stdio::piped());
+
+        let Ok(output) = cmd.output() else {
+            return Vec::new();
+        };
+        if !output.status.success() {
+            log::debug!(
+                "header usage: preprocessing {} failed with {}",
+                self.source,
+                output.status
+            );
+            return Vec::new();
+        }
+        let includes = parse_direct_includes(&output.stderr, &self.directory, root);
+        log::debug!(
+            "header usage: direct includes for {}: {includes:?}",
+            self.source
+        );
+        includes
+    }
+
+    /// Spawn clang and stream its `-ast-dump=json` stdout into a compact
+    /// `Summary`. The (potentially hundreds of MB) dump is consumed
+    /// incrementally and never materialized in memory.
+    fn dump_ast(&self, root: Option<&str>, headers: &[String]) -> Option<(Child, Summary)> {
+        let mut cmd = Command::new(&self.compiler);
+        cmd.current_dir(&self.directory);
+        cmd.args(&self.flags);
+        cmd.args(["-fsyntax-only", "-Xclang", "-ast-dump=json", &self.source]);
+        cmd.stdout(Stdio::piped()).stderr(Stdio::null());
+
+        let mut child = cmd.spawn().ok()?;
+        let stdout = child.stdout.take()?;
+        let mut reader = BufReader::new(stdout);
+
+        // Skip any diagnostics before the JSON document (which starts at the
+        // first '{'); on a clean compile there are none.
+        let mut prefix = Vec::new();
+        let mut byte = [0u8; 1];
+        loop {
+            if reader.read_exact(&mut byte).is_err() {
+                let _ = child.kill();
+                return None;
+            }
+            prefix.push(byte[0]);
+            if byte[0] == b'{' {
+                break;
+            }
+            if prefix.len() > 4096 {
+                let _ = child.kill();
+                return None;
+            }
+        }
+
+        let stream = Cursor::new(prefix).chain(reader);
+        let mut de = serde_json::Deserializer::from_reader(stream);
+        let mut summary = Summary::default();
+        let source = normalize(root, &self.source);
+        let _ = de.deserialize_any(NodeVisitor {
+            summary: &mut summary,
+            root,
+            source: &source,
+            headers,
+            inherited: None,
+        });
+        Some((child, summary))
+    }
+}
+
+/// Extracts the depth-1 entries from clang's `-H` output.
+fn parse_direct_includes(stderr: &[u8], directory: &str, root: Option<&str>) -> Vec<String> {
+    let text = String::from_utf8_lossy(stderr);
+    let mut includes = Vec::new();
+    for line in text.lines() {
+        let Some(path) = line.strip_prefix(". ") else {
+            continue;
+        };
+        let path = path.trim();
+        if path.is_empty() || path.starts_with('<') {
+            continue;
+        }
+        let absolute = if Path::new(path).is_absolute() {
+            path.to_string()
+        } else {
+            format!("{directory}/{path}")
+        };
+        let absolute = clean_absolute_path(&absolute);
+        let normalized = normalize(root, &absolute);
+        // Only project headers, not system or out-of-project headers.
+        if normalized.starts_with('/') || normalized.is_empty() {
+            continue;
+        }
+        if !includes.contains(&normalized) {
+            includes.push(normalized);
+        }
+    }
+    includes
+}
+
+/// Removes `.` and `..` components from an absolute path without touching the
+/// filesystem, so include paths from `-H` line up with AST locations.
+fn clean_absolute_path(path: &str) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            part => parts.push(part),
+        }
+    }
+    format!("/{}", parts.join("/"))
 }
 
 /// Minimal POSIX-ish shell tokenizer for splitting a `command` string.
@@ -226,13 +349,8 @@ fn shell_split(s: &str) -> Vec<String> {
     args
 }
 
-/// For each included header, how the translation unit uses it.
-///
-/// This is a heuristic based on the clang `-ast-dump=json` output: a header is
-/// `NeedsDefinition` when the unit constructs a value of one of its classes,
-/// accesses one of its members, or instantiates a template declared in it;
-/// `DeclarationOnly` when some symbol is referenced but no definition is
-/// needed; `Unused` when nothing is referenced.
+/// For each header, how the translation unit uses it. This is a convenience
+/// entry point for tests and callers that already have an AST dump.
 pub fn header_usage_from_ast(
     ast: &[u8],
     root: Option<&str>,
@@ -248,77 +366,113 @@ pub fn header_usage_from_ast(
         headers,
         inherited: None,
     });
-    classify(&summary, source, headers)
-}
-
-fn classify(summary: &Summary, source: &str, headers: &[String]) -> Vec<(String, HeaderUsage)> {
-    fn types_in<'a>(list: &'a [(String, String)], file: &str) -> Vec<&'a str> {
-        list.iter()
-            .filter(|(f, _)| f == file)
-            .map(|(_, t)| t.as_str())
-            .collect()
-    }
-    fn names_in<'a>(list: &'a [(String, String)], file: &str) -> Vec<&'a str> {
-        list.iter()
-            .filter(|(f, _)| f == file)
-            .map(|(_, n)| n.as_str())
-            .collect()
-    }
-
-    headers
-        .iter()
-        .map(|header| {
-            let classes = names_in(&summary.defined_classes, header);
-            let functions = names_in(&summary.defined_functions, header);
-            let function_keys = names_in(&summary.defined_function_keys, header);
-            let source_definitions = names_in(&summary.source_function_definitions, source);
-            let constructed = types_in(&summary.constructed_types, source);
-            let complete_type_uses = types_in(&summary.complete_type_uses, source);
-            let referenced_types = types_in(&summary.referenced_types, source);
-            let source_decls = names_in(&summary.referenced_decls, source);
-            let instantiated = summary.instantiated_files.contains(header);
-
-            let needs_definition = instantiated
-                || classes
-                    .iter()
-                    .any(|c| constructed.contains(c) || complete_type_uses.contains(c));
-            let referenced = instantiated
-                || classes.iter().any(|c| referenced_types.contains(c))
-                || functions.iter().any(|f| source_decls.contains(f))
-                || function_keys.iter().any(|f| source_definitions.contains(f));
-
-            let usage = if needs_definition {
-                HeaderUsage::NeedsDefinition
-            } else if referenced {
-                HeaderUsage::DeclarationOnly
-            } else {
-                HeaderUsage::Unused
-            };
-            (header.clone(), usage)
-        })
-        .collect()
+    classify(&summary, headers)
 }
 
 /// Compact data extracted from the AST dump.
 #[derive(Default)]
 struct Summary {
-    defined_classes: Vec<(String, String)>,   // (file, class name)
-    defined_functions: Vec<(String, String)>, // (file, function name)
-    defined_function_keys: Vec<(String, String)>, // (file, mangled name)
-    // Functions defined in the source, keyed by mangled name. A definition
-    // whose key matches a header declaration implements that declaration.
-    source_function_definitions: Vec<(String, String)>,
-    referenced_types: Vec<(String, String)>, // (file, base type) type mentions in the source
-    constructed_types: Vec<(String, String)>, // (file, base type) constructed in the source
-    complete_type_uses: Vec<(String, String)>, // (file, type) member access in the source
-    referenced_decls: Vec<(String, String)>, // (file, name) DeclRefExpr in the source
+    /// Last file name written by clang's JSON dumper. Clang omits `loc.file`
+    /// when it is unchanged, so this restores the omitted file.
+    last_file: Option<String>,
+    /// Declarations in the source or a directly included header, by AST id.
+    decls: HashMap<String, DeclInfo>,
+    /// Class/alias names declared in directly included headers.
+    header_types: HashMap<String, Vec<String>>,
+    /// Class names *defined* in directly included headers.
+    header_type_definitions: HashMap<String, Vec<String>>,
+    /// All declaration names declared in directly included headers.
+    header_symbols: HashMap<String, Vec<String>>,
+    /// Names defined (not merely declared) in directly included headers.
+    header_definitions: HashMap<String, Vec<String>>,
+    /// Function keys (mangled name when available) declared in headers.
+    header_function_keys: HashMap<String, String>,
+    /// Function keys defined by the source (to match header declarations).
+    source_function_definitions: Vec<String>,
+    /// References to declarations, from the source.
+    decl_refs: Vec<DeclReference>,
+    /// Type mentions from the source.
+    type_refs: Vec<TypeReference>,
+    /// Headers whose templates were instantiated in this TU.
     instantiated_files: Vec<String>,
+    /// Headers referenced through macro expansions in the source.
+    macro_refs: Vec<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Debug)]
+struct DeclInfo {
+    file: String,
+    is_definition: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DeclKind {
+    Class,
+    Function,
+    Variable,
+    Other,
+}
+
+struct DeclReference {
+    id: Option<String>,
+    name: String,
+}
+
+struct TypeReference {
+    name: String,
+    needs_definition: bool,
+}
+
+/// A source location with the file clang's JSON writer omitted restored.
+#[derive(Clone, Default)]
+struct ResolvedLoc {
+    /// File where the declaration/entity is spelled (macro definition for a
+    /// macro expansion).
+    spelling: Option<String>,
+    /// File where the entity is used (macro expansion site for a macro).
+    expansion: Option<String>,
+    is_macro: bool,
+}
+
+#[derive(Deserialize, Default)]
 struct LocInfo {
     #[serde(default)]
     file: Option<String>,
+    #[serde(default, rename = "spellingLoc")]
+    spelling_loc: Option<Box<LocInfo>>,
+    #[serde(default, rename = "expansionLoc")]
+    expansion_loc: Option<Box<LocInfo>>,
+}
+
+#[derive(Deserialize, Default)]
+struct RangeInfo {
+    #[serde(default)]
+    begin: LocInfo,
+    #[serde(default)]
+    end: LocInfo,
+}
+
+fn process_loc(loc: &LocInfo, last_file: &mut Option<String>) -> ResolvedLoc {
+    if let (Some(spelling), Some(expansion)) = (&loc.spelling_loc, &loc.expansion_loc) {
+        // clang writes the spelling location first, then the expansion one.
+        let spelling = process_loc(spelling, last_file);
+        let expansion = process_loc(expansion, last_file);
+        ResolvedLoc {
+            spelling: spelling.spelling.or(spelling.expansion),
+            expansion: expansion.expansion.or(expansion.spelling),
+            is_macro: true,
+        }
+    } else {
+        if let Some(file) = &loc.file {
+            *last_file = Some(file.clone());
+        }
+        let file = loc.file.clone().or_else(|| last_file.clone());
+        ResolvedLoc {
+            spelling: file.clone(),
+            expansion: file,
+            is_macro: false,
+        }
+    }
 }
 
 #[derive(Clone, Default, Deserialize)]
@@ -332,7 +486,21 @@ struct TypeInfo {
 #[derive(Deserialize)]
 struct ReferencedDeclInfo {
     #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
     name: Option<String>,
+}
+
+#[derive(Default)]
+struct ChildInfo {
+    kind: String,
+    type_info: Option<TypeInfo>,
+}
+
+#[derive(Default)]
+struct InnerInfo {
+    first_type: Option<TypeInfo>,
+    has_body: bool,
 }
 
 /// Seed that deserializes one AST node into its `Summary` contribution,
@@ -346,7 +514,7 @@ struct NodeSeed<'a> {
 }
 
 impl<'de> DeserializeSeed<'de> for NodeSeed<'_> {
-    type Value = Option<TypeInfo>;
+    type Value = ChildInfo;
 
     fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
     where
@@ -371,7 +539,7 @@ struct NodeVisitor<'a> {
 }
 
 impl<'de> Visitor<'de> for NodeVisitor<'_> {
-    type Value = Option<TypeInfo>;
+    type Value = ChildInfo;
 
     fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("an AST node object")
@@ -382,68 +550,77 @@ impl<'de> Visitor<'de> for NodeVisitor<'_> {
         A: MapAccess<'de>,
     {
         let mut kind = String::new();
+        let mut id: Option<String> = None;
         let mut name: Option<String> = None;
         let mut mangled_name: Option<String> = None;
-        let mut own_file: Option<String> = None;
+        let mut loc: Option<ResolvedLoc> = None;
         let mut qual_type: Option<String> = None;
         let mut desugared_qual_type: Option<String> = None;
-        let mut referenced_name: Option<String> = None;
-        let mut first_child_type: Option<TypeInfo> = None;
+        let mut arg_type: Option<TypeInfo> = None;
+        let mut referenced: Option<ReferencedDeclInfo> = None;
         let mut complete = false;
         let mut is_instantiation = false;
+        let mut storage_class: Option<String> = None;
+        let mut inner_info = InnerInfo::default();
 
         loop {
-            let key = map.next_key::<String>()?;
-            let Some(key) = key else { break };
+            let Some(key) = map.next_key::<String>()? else {
+                break;
+            };
             match key.as_str() {
                 "kind" => {
                     if let Some(k) = map.next_value::<Option<String>>()? {
                         kind = k;
                     }
                 }
+                "id" => id = map.next_value::<Option<String>>()?,
                 "name" => name = map.next_value::<Option<String>>()?,
                 "mangledName" => mangled_name = map.next_value::<Option<String>>()?,
                 "loc" => {
-                    let loc = map.next_value::<LocInfo>()?;
-                    own_file = loc.file;
+                    if let Some(value) = map.next_value::<Option<LocInfo>>()? {
+                        loc = Some(process_loc(&value, &mut self.summary.last_file));
+                    }
+                }
+                "range" => {
+                    if let Some(value) = map.next_value::<Option<RangeInfo>>()? {
+                        // clang also updates its file deduplication state for
+                        // ranges, so keep it in sync.
+                        let _ = process_loc(&value.begin, &mut self.summary.last_file);
+                        let _ = process_loc(&value.end, &mut self.summary.last_file);
+                    }
                 }
                 "type" => {
-                    let t = map.next_value::<TypeInfo>()?;
-                    qual_type = t.qual_type;
-                    desugared_qual_type = t.desugared_qual_type;
+                    if let Some(t) = map.next_value::<Option<TypeInfo>>()? {
+                        qual_type = t.qual_type;
+                        desugared_qual_type = t.desugared_qual_type;
+                    }
+                }
+                "argType" => {
+                    arg_type = map.next_value::<Option<TypeInfo>>()?;
                 }
                 "referencedDecl" => {
-                    referenced_name = map
-                        .next_value::<Option<ReferencedDeclInfo>>()?
-                        .and_then(|decl| decl.name);
+                    referenced = map.next_value::<Option<ReferencedDeclInfo>>()?;
                 }
                 "completeDefinition" => complete = map.next_value::<bool>()?,
                 "templateSpecializationKind" => {
                     is_instantiation = map.next_value::<Option<String>>()?.is_some();
                 }
+                "storageClass" => storage_class = map.next_value::<Option<String>>()?,
                 "inner" => {
-                    let node_file = own_file
-                        .clone()
-                        .or_else(|| self.inherited.clone())
-                        .map(|f| normalize(self.root, &f));
-                    // Only descend into nodes that belong to the translation unit
-                    // or a project header; system-header subtrees are the bulk of
-                    // the dump and carry nothing we care about.
-                    let relevant = node_file
+                    let current_file = current_file(&loc, &self.inherited);
+                    let normalized = current_file.as_deref().map(|f| normalize(self.root, f));
+                    let relevant = normalized
                         .as_deref()
                         .is_none_or(|f| f == self.source || self.headers.iter().any(|h| h == f));
                     if relevant {
-                        let child_type = map.next_value_seed(InnerSeed {
+                        let inherited = current_file;
+                        inner_info = map.next_value_seed(InnerSeed {
                             summary: &mut *self.summary,
                             root: self.root,
                             source: self.source,
                             headers: self.headers,
-                            inherited: node_file,
+                            inherited,
                         })?;
-                        // Remember the first child's type. For a member access
-                        // this is the object expression, whose type is the
-                        // class whose complete definition the access requires.
-                        first_child_type = child_type;
                     } else {
                         map.next_value::<IgnoredAny>()?;
                     }
@@ -454,111 +631,219 @@ impl<'de> Visitor<'de> for NodeVisitor<'_> {
             }
         }
 
-        let file = own_file
-            .or(self.inherited)
-            .map(|f| normalize(self.root, &f));
-        let in_headers = file
+        let decl_file_raw = loc
+            .as_ref()
+            .and_then(|l| l.spelling.clone().or_else(|| l.expansion.clone()))
+            .or_else(|| self.inherited.clone());
+        let use_file_raw = loc
+            .as_ref()
+            .and_then(|l| l.expansion.clone().or_else(|| l.spelling.clone()))
+            .or_else(|| self.inherited.clone());
+        let decl_file = decl_file_raw.as_deref().map(|f| normalize(self.root, f));
+        let use_file = use_file_raw.as_deref().map(|f| normalize(self.root, f));
+
+        let in_source = use_file.as_deref() == Some(self.source);
+        let declared_in_source = decl_file.as_deref() == Some(self.source);
+        let in_headers = decl_file
             .as_deref()
             .is_some_and(|f| self.headers.iter().any(|h| h == f));
-        let in_source = file.as_deref() == Some(self.source);
-        let kind = kind.as_str();
-        let name_ref = name.as_deref().unwrap_or("");
-        let type_refs = [qual_type.as_deref(), desugared_qual_type.as_deref()];
 
-        if let Some(file) = file.as_deref() {
-            if (kind == "CXXRecordDecl" || kind == "RecordDecl")
-                && complete
-                && in_headers
-                && !name_ref.is_empty()
-            {
+        // A macro expanded in the source whose definition lives in a direct
+        // header is a use of that header.
+        if loc.as_ref().is_some_and(|l| l.is_macro)
+            && in_source
+            && let Some(file) = &decl_file
+            && in_headers
+        {
+            self.summary.macro_refs.push(file.clone());
+        }
+
+        let name_ref = name.as_deref().unwrap_or_default();
+        let kind_ref = kind.as_str();
+        let decl_kind = decl_kind(kind_ref);
+        let is_definition = match decl_kind {
+            DeclKind::Class => complete,
+            DeclKind::Function => inner_info.has_body,
+            DeclKind::Variable => storage_class.as_deref() != Some("extern"),
+            DeclKind::Other => false,
+        };
+        let function_key = mangled_name.as_deref().unwrap_or(name_ref);
+
+        if kind_ref.ends_with("Decl")
+            && (declared_in_source || in_headers)
+            && let Some(decl_id) = &id
+            && !name_ref.is_empty()
+        {
+            self.summary.decls.insert(
+                decl_id.clone(),
+                DeclInfo {
+                    file: decl_file.clone().unwrap_or_default(),
+                    is_definition,
+                },
+            );
+        }
+
+        if in_headers
+            && !name_ref.is_empty()
+            && matches!(
+                decl_kind,
+                DeclKind::Class | DeclKind::Function | DeclKind::Variable
+            )
+        {
+            push_unique(
                 self.summary
-                    .defined_classes
-                    .push((file.to_string(), name_ref.to_string()));
+                    .header_symbols
+                    .entry(name_ref.to_string())
+                    .or_default(),
+                decl_file.as_deref().unwrap_or_default(),
+            );
+            if decl_kind == DeclKind::Class {
+                let file = decl_file.as_deref().unwrap_or_default();
+                push_unique(
+                    self.summary
+                        .header_types
+                        .entry(name_ref.to_string())
+                        .or_default(),
+                    file,
+                );
+                if complete {
+                    push_unique(
+                        self.summary
+                            .header_type_definitions
+                            .entry(name_ref.to_string())
+                            .or_default(),
+                        file,
+                    );
+                }
             }
-            let is_function = kind == "FunctionDecl" || kind == "CXXMethodDecl";
-            let function_key = mangled_name.as_deref().unwrap_or(name_ref);
-            if is_function && in_headers && !name_ref.is_empty() {
-                self.summary
-                    .defined_functions
-                    .push((file.to_string(), name_ref.to_string()));
+            if is_definition {
+                push_unique(
+                    self.summary
+                        .header_definitions
+                        .entry(name_ref.to_string())
+                        .or_default(),
+                    decl_file.as_deref().unwrap_or_default(),
+                );
+            }
+            if decl_kind == DeclKind::Function {
                 if !function_key.is_empty() {
                     self.summary
-                        .defined_function_keys
-                        .push((file.to_string(), function_key.to_string()));
+                        .header_function_keys
+                        .entry(function_key.to_string())
+                        .or_insert_with(|| decl_file.clone().unwrap_or_default());
+                }
+                if !name_ref.is_empty() {
+                    self.summary
+                        .header_function_keys
+                        .entry(name_ref.to_string())
+                        .or_insert_with(|| decl_file.clone().unwrap_or_default());
                 }
             }
-            if is_function && in_source && !function_key.is_empty() {
-                self.summary
-                    .source_function_definitions
-                    .push((file.to_string(), function_key.to_string()));
-            }
-            let is_constructed = matches!(
-                kind,
-                "CXXConstructExpr"
-                    | "CXXNewExpr"
-                    | "CXXTemporaryObjectExpr"
-                    | "CXXFunctionalCastExpr"
-            );
-            let is_type_mention = is_constructed
-                || matches!(
-                    kind,
-                    "VarDecl" | "ParmVarDecl" | "FieldDecl" | "DeclRefExpr"
-                );
-            if in_source {
-                for type_ref in type_refs.into_iter().flatten() {
-                    for type_name in type_names(type_ref) {
-                        if is_constructed {
-                            self.summary
-                                .constructed_types
-                                .push((file.to_string(), type_name.clone()));
-                        }
-                        if is_type_mention {
-                            self.summary
-                                .referenced_types
-                                .push((file.to_string(), type_name));
-                        }
-                    }
-                }
-                if kind == "DeclRefExpr" {
-                    // Clang's JSON dump puts the referenced declaration's name in
-                    // `referencedDecl`; the `DeclRefExpr` node itself has no
-                    // `name`. Keep falling back to `name` for hand-written ASTs.
-                    let referenced_name = referenced_name.as_deref().unwrap_or(name_ref);
-                    if !referenced_name.is_empty() {
-                        self.summary
-                            .referenced_decls
-                            .push((file.to_string(), referenced_name.to_string()));
-                    }
-                }
-                if kind == "MemberExpr"
-                    && let Some(base_type) = first_child_type.as_ref()
-                    && let Some(type_ref) = base_type
-                        .qual_type
-                        .as_deref()
-                        .or(base_type.desugared_qual_type.as_deref())
-                {
-                    let base_name = base_type_name(type_ref);
-                    if !base_name.is_empty() {
-                        self.summary
-                            .complete_type_uses
-                            .push((file.to_string(), base_name));
-                    }
-                }
-            }
-            if (kind == "CXXRecordDecl" || kind == "FunctionDecl") && is_instantiation && in_headers
+            if is_instantiation
+                && matches!(decl_kind, DeclKind::Class | DeclKind::Function)
+                && let Some(file) = &decl_file
             {
-                self.summary.instantiated_files.push(file.to_string());
+                self.summary.instantiated_files.push(file.clone());
             }
         }
-        if qual_type.is_some() || desugared_qual_type.is_some() {
-            Ok(Some(TypeInfo {
-                qual_type,
-                desugared_qual_type,
-            }))
-        } else {
-            Ok(None)
+
+        if declared_in_source
+            && decl_kind == DeclKind::Function
+            && inner_info.has_body
+            && !function_key.is_empty()
+        {
+            self.summary
+                .source_function_definitions
+                .push(function_key.to_string());
         }
+
+        if in_source {
+            if kind_ref == "DeclRefExpr" {
+                self.summary.decl_refs.push(DeclReference {
+                    id: referenced.as_ref().and_then(|r| r.id.clone()),
+                    name: referenced
+                        .as_ref()
+                        .and_then(|r| r.name.clone())
+                        .unwrap_or_else(|| name_ref.to_string()),
+                });
+            }
+
+            match kind_ref {
+                "CXXConstructExpr"
+                | "CXXNewExpr"
+                | "CXXTemporaryObjectExpr"
+                | "CXXFunctionalCastExpr"
+                | "CXXDeleteExpr"
+                | "InitListExpr" => {
+                    add_type_refs(
+                        self.summary,
+                        qual_type.as_deref(),
+                        desugared_qual_type.as_deref(),
+                        true,
+                    );
+                }
+                "MemberExpr" => {
+                    if let Some(base) = &inner_info.first_type {
+                        add_type_refs(
+                            self.summary,
+                            base.qual_type.as_deref(),
+                            base.desugared_qual_type.as_deref(),
+                            true,
+                        );
+                    }
+                }
+                "VarDecl" | "FieldDecl" => {
+                    let is_indirect = [qual_type.as_deref(), desugared_qual_type.as_deref()]
+                        .into_iter()
+                        .flatten()
+                        .any(|t| t.contains('*') || t.contains('&'));
+                    add_type_refs(
+                        self.summary,
+                        qual_type.as_deref(),
+                        desugared_qual_type.as_deref(),
+                        !is_indirect,
+                    );
+                }
+                "UnaryExprOrTypeTraitExpr" => {
+                    if let Some(arg) = &arg_type {
+                        add_type_refs(
+                            self.summary,
+                            arg.qual_type.as_deref(),
+                            arg.desugared_qual_type.as_deref(),
+                            true,
+                        );
+                    }
+                }
+                "ParmVarDecl" | "DeclRefExpr" => {
+                    add_type_refs(
+                        self.summary,
+                        qual_type.as_deref(),
+                        desugared_qual_type.as_deref(),
+                        false,
+                    );
+                }
+                _ => {}
+            }
+        }
+
+        Ok(ChildInfo {
+            kind,
+            type_info: if qual_type.is_some() || desugared_qual_type.is_some() {
+                Some(TypeInfo {
+                    qual_type,
+                    desugared_qual_type,
+                })
+            } else {
+                None
+            },
+        })
     }
+}
+
+fn current_file(loc: &Option<ResolvedLoc>, inherited: &Option<String>) -> Option<String> {
+    loc.as_ref()
+        .and_then(|l| l.spelling.clone().or_else(|| l.expansion.clone()))
+        .or_else(|| inherited.clone())
 }
 
 /// Seed that deserializes an `inner` array, processing each child node in turn.
@@ -571,7 +856,7 @@ struct InnerSeed<'a> {
 }
 
 impl<'de> DeserializeSeed<'de> for InnerSeed<'_> {
-    type Value = Option<TypeInfo>;
+    type Value = InnerInfo;
 
     fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
     where
@@ -596,7 +881,7 @@ struct InnerVisitor<'a> {
 }
 
 impl<'de> Visitor<'de> for InnerVisitor<'_> {
-    type Value = Option<TypeInfo>;
+    type Value = InnerInfo;
 
     fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("an inner AST node array")
@@ -606,9 +891,9 @@ impl<'de> Visitor<'de> for InnerVisitor<'_> {
     where
         A: SeqAccess<'de>,
     {
-        let mut first = None;
+        let mut info = InnerInfo::default();
         let mut seen_first = false;
-        while let Some(value) = seq.next_element_seed(NodeSeed {
+        while let Some(child) = seq.next_element_seed(NodeSeed {
             summary: &mut *self.summary,
             root: self.root,
             source: self.source,
@@ -617,11 +902,130 @@ impl<'de> Visitor<'de> for InnerVisitor<'_> {
         })? {
             if !seen_first {
                 seen_first = true;
-                first = value;
+                info.first_type = child.type_info;
+            }
+            if child.kind == "CompoundStmt" {
+                info.has_body = true;
             }
         }
-        Ok(first)
+        Ok(info)
     }
+}
+
+fn decl_kind(kind: &str) -> DeclKind {
+    match kind {
+        "CXXRecordDecl"
+        | "RecordDecl"
+        | "ClassTemplateDecl"
+        | "ClassTemplateSpecializationDecl"
+        | "ClassTemplatePartialSpecializationDecl"
+        | "EnumDecl"
+        | "TypedefDecl"
+        | "TypeAliasDecl"
+        | "TypeAliasTemplateDecl" => DeclKind::Class,
+        "FunctionDecl"
+        | "CXXMethodDecl"
+        | "CXXConstructorDecl"
+        | "CXXDestructorDecl"
+        | "CXXConversionDecl"
+        | "FunctionTemplateDecl" => DeclKind::Function,
+        "VarDecl" => DeclKind::Variable,
+        _ => DeclKind::Other,
+    }
+}
+
+fn push_unique(values: &mut Vec<String>, value: &str) {
+    if !value.is_empty() && !values.iter().any(|v| v == value) {
+        values.push(value.to_string());
+    }
+}
+
+fn add_type_refs(
+    summary: &mut Summary,
+    qual_type: Option<&str>,
+    desugared_qual_type: Option<&str>,
+    needs_definition: bool,
+) {
+    for t in [qual_type, desugared_qual_type].into_iter().flatten() {
+        for type_name in type_names(t) {
+            summary.type_refs.push(TypeReference {
+                name: type_name,
+                needs_definition,
+            });
+        }
+    }
+}
+
+fn classify(summary: &Summary, headers: &[String]) -> Vec<(String, HeaderUsage)> {
+    let mut usage: HashMap<&str, HeaderUsage> = headers
+        .iter()
+        .map(|h| (h.as_str(), HeaderUsage::Unused))
+        .collect();
+
+    fn mark(usage: &mut HashMap<&str, HeaderUsage>, file: &str, needs_definition: bool) {
+        let Some(slot) = usage.get_mut(file) else {
+            return;
+        };
+
+        *slot = match (*slot, needs_definition) {
+            (HeaderUsage::NeedsDefinition, _) => HeaderUsage::NeedsDefinition,
+            (_, true) => HeaderUsage::NeedsDefinition,
+            (HeaderUsage::DeclarationOnly, false) => HeaderUsage::DeclarationOnly,
+            (HeaderUsage::Unused, false) => HeaderUsage::DeclarationOnly,
+        };
+    }
+
+    for reference in &summary.decl_refs {
+        if let Some(info) = reference.id.as_ref().and_then(|id| summary.decls.get(id)) {
+            if !info.file.is_empty() {
+                mark(&mut usage, &info.file, info.is_definition);
+            }
+            continue;
+        }
+        // Fallback for ASTs without declaration ids (and for synthetic tests).
+        if let Some(files) = summary.header_symbols.get(&reference.name) {
+            let definitions = summary.header_definitions.get(&reference.name);
+            for file in files {
+                let needs_definition =
+                    definitions.is_some_and(|files| files.iter().any(|f| f == file));
+                mark(&mut usage, file, needs_definition);
+            }
+        }
+    }
+
+    for reference in &summary.type_refs {
+        if let Some(files) = summary.header_types.get(&reference.name) {
+            let definitions = summary.header_type_definitions.get(&reference.name);
+            for file in files {
+                let needs_definition = reference.needs_definition
+                    && definitions.is_some_and(|files| files.iter().any(|f| f == file));
+                mark(&mut usage, file, needs_definition);
+            }
+        }
+    }
+
+    for key in &summary.source_function_definitions {
+        if let Some(file) = summary.header_function_keys.get(key) {
+            mark(&mut usage, file, false);
+        }
+    }
+
+    for file in &summary.instantiated_files {
+        mark(&mut usage, file, true);
+    }
+    for file in &summary.macro_refs {
+        mark(&mut usage, file, false);
+    }
+
+    headers
+        .iter()
+        .map(|header| {
+            (
+                header.clone(),
+                *usage.get(header.as_str()).unwrap_or(&HeaderUsage::Unused),
+            )
+        })
+        .collect()
 }
 
 /// Normalize a clang `loc.file` to the analysis form: relative to `root` for
@@ -728,6 +1132,7 @@ fn is_ignored_type_name(name: &str) -> bool {
 
 /// Reduce a clang type string to its base class name, e.g. `class Foo *` -> `Foo`
 /// and `std::vector<int>` -> `vector`.
+#[cfg(test)]
 fn base_type_name(t: &str) -> String {
     type_names(t)
         .into_iter()
@@ -880,7 +1285,8 @@ mod tests {
                 { "kind": "FunctionDecl", "name": "foo", "mangledName": "_Z3foov",
                   "loc": { "file": "src/foo.h", "line": 1, "col": 1 } },
                 { "kind": "FunctionDecl", "name": "foo", "mangledName": "_Z3foov",
-                  "loc": { "file": "src/foo.cpp", "line": 1, "col": 1 } }
+                  "loc": { "file": "src/foo.cpp", "line": 1, "col": 1 },
+                  "inner": [ { "kind": "CompoundStmt" } ] }
             ]
         });
         assert_eq!(
@@ -998,5 +1404,120 @@ mod tests {
         );
         assert_eq!(type_names("unsigned long"), Vec::<String>::new());
         assert_eq!(type_names("void (*)(const Foo &)"), vec!["Foo".to_string()]);
+    }
+
+    #[test]
+    fn aggregate_initialization_needs_definition() {
+        let ast = json!({
+            "kind": "TranslationUnitDecl",
+            "inner": [
+                { "kind": "CXXRecordDecl", "name": "Sphere", "completeDefinition": true,
+                  "loc": { "file": "src/shapes.h", "line": 1, "col": 1 } },
+                { "kind": "InitListExpr", "type": { "qualType": "const Sphere" },
+                  "loc": { "file": "src/main.cpp", "line": 2, "col": 1 } }
+            ]
+        });
+        assert_eq!(
+            run(ast, "src/main.cpp", &["src/shapes.h"]),
+            vec![("src/shapes.h".to_string(), HeaderUsage::NeedsDefinition)]
+        );
+    }
+
+    #[test]
+    fn inline_function_definition_needs_definition() {
+        let ast = json!({
+            "kind": "TranslationUnitDecl",
+            "inner": [
+                { "kind": "FunctionDecl", "id": "0x1", "name": "radians",
+                  "loc": { "file": "src/utils.h", "line": 1, "col": 1 },
+                  "inner": [ { "kind": "CompoundStmt" } ] },
+                { "kind": "DeclRefExpr",
+                  "loc": { "file": "src/main.cpp", "line": 2, "col": 1 },
+                  "referencedDecl": { "id": "0x1", "kind": "FunctionDecl",
+                                      "name": "radians" } }
+            ]
+        });
+        assert_eq!(
+            run(ast, "src/main.cpp", &["src/utils.h"]),
+            vec![("src/utils.h".to_string(), HeaderUsage::NeedsDefinition)]
+        );
+    }
+
+    #[test]
+    fn omitted_file_uses_the_previous_file() {
+        // clang's JSON dumper omits `file` when it is unchanged. A declaration
+        // without `file` still belongs to the header established by the
+        // previous location.
+        let ast = json!({
+            "kind": "TranslationUnitDecl",
+            "inner": [
+                { "kind": "FunctionDecl", "name": "first",
+                  "loc": { "file": "src/header.h", "line": 1, "col": 1 } },
+                { "kind": "FunctionDecl", "name": "second",
+                  "loc": { "line": 2, "col": 1 } },
+                { "kind": "DeclRefExpr",
+                  "loc": { "file": "src/main.cpp", "line": 2, "col": 1 },
+                  "referencedDecl": { "kind": "FunctionDecl", "name": "second" } }
+            ]
+        });
+        assert_eq!(
+            run(ast, "src/main.cpp", &["src/header.h"]),
+            vec![("src/header.h".to_string(), HeaderUsage::DeclarationOnly)]
+        );
+    }
+
+    #[test]
+    fn parses_depth_one_includes() {
+        let stderr = b".. /p/include/nested.h\n. /p/include/direct.h\n. /usr/include/stdio.h\n. /p/include/direct.h\n...\n. <built-in>\n";
+        assert_eq!(
+            parse_direct_includes(stderr, "/p", Some("/p")),
+            vec!["include/direct.h".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_direct_includes_resolves_relative_paths() {
+        let stderr = b". ../include/local.h\n";
+        assert_eq!(
+            parse_direct_includes(stderr, "/p/build", Some("/p")),
+            vec!["include/local.h".to_string()]
+        );
+    }
+
+    #[test]
+    fn sizeof_argument_needs_definition() {
+        let ast = json!({
+            "kind": "TranslationUnitDecl",
+            "inner": [
+                { "kind": "CXXRecordDecl", "name": "Foo", "completeDefinition": true,
+                  "loc": { "file": "src/foo.h", "line": 1, "col": 1 } },
+                { "kind": "UnaryExprOrTypeTraitExpr", "name": "sizeof",
+                  "type": { "qualType": "unsigned long" },
+                  "argType": { "qualType": "Foo" },
+                  "loc": { "file": "src/main.cpp", "line": 2, "col": 1 } }
+            ]
+        });
+        assert_eq!(
+            run(ast, "src/main.cpp", &["src/foo.h"]),
+            vec![("src/foo.h".to_string(), HeaderUsage::NeedsDefinition)]
+        );
+    }
+
+    #[test]
+    fn macro_expansion_uses_the_spelling_header() {
+        let ast = json!({
+            "kind": "TranslationUnitDecl",
+            "inner": [
+                { "kind": "DeclRefExpr",
+                  "loc": {
+                      "spellingLoc": { "file": "src/macros.h", "line": 1, "col": 1 },
+                      "expansionLoc": { "file": "src/main.cpp", "line": 2, "col": 1 }
+                  } }
+            ]
+        });
+        assert_eq!(
+            run(ast, "src/main.cpp", &["src/macros.h"]),
+            vec![("src/macros.h".to_string(), HeaderUsage::DeclarationOnly)]
+        );
     }
 }

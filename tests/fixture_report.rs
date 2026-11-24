@@ -78,12 +78,14 @@ fn assert_aggregation_invariants(strings: &[String], result: &AnalysisResult) {
         let mut count = 0i64;
         for u in result.unit_analysis.values() {
             let chains = u.header_inclusion_paths.get(hid);
-            if !u.header_parse_duration.contains_key(hid) && chains.is_none() {
+            let has_usage = u.header_usage.contains_key(hid);
+            if !u.header_parse_duration.contains_key(hid) && chains.is_none() && !has_usage {
                 continue;
             }
             sum += u.header_parse_duration.get(hid).copied().unwrap_or(0);
             // One entry per `Source` span, not one per unit: a header can be
-            // entered several times in the same translation unit.
+            // entered several times in the same translation unit. Headers that
+            // have only usage data (no trace span) count once for the unit.
             count += chains
                 .map(|chains| chains.values().copied().sum::<i64>())
                 .filter(|&n| n > 0)
@@ -209,28 +211,23 @@ fn assert_fixture_structure(strings: &[String], result: &AnalysisResult) {
     assert!(main.frontend_duration > main.backend_duration);
 }
 
-/// The edge-case units must be classified as expected when header-usage data
-/// is present. Classifications that depend on clang's trace spans (e.g. the
-/// declaration-only case) are only asserted when the header was actually
-/// analyzed.
+/// The edge-case units must be classified exactly as expected. Direct includes
+/// are discovered from the compiler, so headers that clang's time trace omitted
+/// are still classified.
 fn assert_header_usage(strings: &[String], result: &AnalysisResult) {
     let has_any_usage = result
         .unit_analysis
         .values()
         .any(|u| !u.header_usage.is_empty());
-    if !has_any_usage {
-        eprintln!("SKIP header-usage assertions: no header-usage data (clang++ re-run failed?)");
-        return;
-    }
+    assert!(
+        has_any_usage,
+        "header-usage analysis produced no data; the compile command could not be re-run"
+    );
 
+    // Only direct includes can be removed from a unit. A transitive header must
+    // never be classified here.
     for (uid, u) in &result.unit_analysis {
         let name = resolve(strings, *uid);
-        let usage_of = |suffix: &str| {
-            header_id(strings, result, suffix).and_then(|hid| u.header_usage.get(&hid))
-        };
-
-        // Only direct includes can be removed from this unit. A transitive
-        // header must never be classified as unused/forward-declarable here.
         for hid in u.header_usage.keys() {
             let direct = u
                 .header_inclusion_paths
@@ -242,80 +239,119 @@ fn assert_header_usage(strings: &[String], result: &AnalysisResult) {
                 resolve(strings, *hid)
             );
         }
+    }
 
-        // edge_unused.cpp includes unused.h but uses nothing from it.
-        if name.ends_with("/edge_unused.cpp")
-            && let Some(usage) = usage_of("include/unused.h")
-        {
-            assert_eq!(
-                usage,
-                &HeaderUsage::Unused,
-                "unused.h in edge_unused.cpp expected Unused, got {usage:?}"
-            );
-        }
-        // edge_needs.cpp constructs Widget, so fwd_class.h needs its definition.
-        if name.ends_with("/edge_needs.cpp")
-            && let Some(usage) = usage_of("include/fwd_class.h")
-        {
-            assert_eq!(
-                usage,
-                &HeaderUsage::NeedsDefinition,
-                "fwd_class.h in edge_needs.cpp expected NeedsDefinition, got {usage:?}"
-            );
-        }
-        // shapes.cpp accesses Sphere::radius and Box::min/max, so it needs the
-        // definitions from shapes.h rather than just forward declarations.
-        if name.ends_with("/shapes.cpp")
-            && let Some(usage) = usage_of("include/shapes.h")
-        {
-            assert_eq!(
-                usage,
-                &HeaderUsage::NeedsDefinition,
-                "shapes.h in shapes.cpp expected NeedsDefinition, got {usage:?}"
-            );
-        }
-        // shapes.cpp only includes shapes.h directly. geometry.h and vector3.h
-        // are reached through it and must not be classified for this unit.
-        if name.ends_with("/shapes.cpp") {
-            assert!(
-                usage_of("include/geometry.h").is_none(),
-                "geometry.h is transitive in shapes.cpp and must not be classified"
-            );
-            assert!(
-                usage_of("include/vector3.h").is_none(),
-                "vector3.h is transitive in shapes.cpp and must not be classified"
-            );
-        }
-        // main.cpp calls centroid() declared in geometry.h.
-        if name.ends_with("/main.cpp")
-            && let Some(usage) = usage_of("include/geometry.h")
-        {
-            assert_ne!(
-                usage,
-                &HeaderUsage::Unused,
-                "geometry.h in main.cpp is used but was classified Unused"
-            );
-        }
-        // geometry.cpp defines the functions declared in geometry.h.
-        if name.ends_with("/geometry.cpp")
-            && let Some(usage) = usage_of("include/geometry.h")
-        {
-            assert_eq!(
-                usage,
-                &HeaderUsage::DeclarationOnly,
-                "geometry.h in geometry.cpp expected DeclarationOnly, got {usage:?}"
-            );
-        }
-        // edge_diamond.cpp constructs DiamondA.
-        if name.ends_with("/edge_diamond.cpp")
-            && let Some(usage) = usage_of("include/diamond_a.h")
-        {
-            assert_ne!(
-                usage,
-                &HeaderUsage::Unused,
-                "diamond_a.h in edge_diamond.cpp is used but was classified Unused"
-            );
-        }
+    let expected: &[(&str, &str, HeaderUsage)] = &[
+        // Unused direct includes.
+        ("/edge_unused.cpp", "include/unused.h", HeaderUsage::Unused),
+        ("/shapes.cpp", "include/utils.h", HeaderUsage::Unused),
+        // Used only through declarations.
+        (
+            "/edge_fwd.cpp",
+            "include/fwd_class.h",
+            HeaderUsage::DeclarationOnly,
+        ),
+        (
+            "/edge_unused.cpp",
+            "include/geometry.h",
+            HeaderUsage::DeclarationOnly,
+        ),
+        (
+            "/edge_fwd.cpp",
+            "include/geometry.h",
+            HeaderUsage::DeclarationOnly,
+        ),
+        (
+            "/edge_needs.cpp",
+            "include/geometry.h",
+            HeaderUsage::DeclarationOnly,
+        ),
+        (
+            "/edge_diamond.cpp",
+            "include/geometry.h",
+            HeaderUsage::DeclarationOnly,
+        ),
+        (
+            "/edge_diamond2.cpp",
+            "include/geometry.h",
+            HeaderUsage::DeclarationOnly,
+        ),
+        (
+            "/main.cpp",
+            "include/geometry.h",
+            HeaderUsage::DeclarationOnly,
+        ),
+        (
+            "/geometry.cpp",
+            "include/geometry.h",
+            HeaderUsage::DeclarationOnly,
+        ),
+        // Uses that require the definition.
+        (
+            "/edge_unused.cpp",
+            "include/shapes.h",
+            HeaderUsage::NeedsDefinition,
+        ),
+        (
+            "/edge_needs.cpp",
+            "include/fwd_class.h",
+            HeaderUsage::NeedsDefinition,
+        ),
+        (
+            "/edge_diamond.cpp",
+            "include/diamond_a.h",
+            HeaderUsage::NeedsDefinition,
+        ),
+        (
+            "/edge_diamond2.cpp",
+            "include/diamond_b.h",
+            HeaderUsage::NeedsDefinition,
+        ),
+        (
+            "/main.cpp",
+            "include/shapes.h",
+            HeaderUsage::NeedsDefinition,
+        ),
+        ("/main.cpp", "include/utils.h", HeaderUsage::NeedsDefinition),
+        (
+            "/shapes.cpp",
+            "include/shapes.h",
+            HeaderUsage::NeedsDefinition,
+        ),
+    ];
+
+    for (unit_suffix, header_suffix, want) in expected {
+        let unit = result
+            .unit_analysis
+            .iter()
+            .find(|(id, _)| resolve(strings, **id).ends_with(unit_suffix))
+            .unwrap_or_else(|| panic!("missing unit '{unit_suffix}'"))
+            .1;
+        let hid = header_id(strings, result, header_suffix)
+            .unwrap_or_else(|| panic!("missing header '{header_suffix}'"));
+        let got = unit.header_usage.get(&hid).unwrap_or_else(|| {
+            panic!("unit '{unit_suffix}' did not classify header '{header_suffix}'")
+        });
+        assert_eq!(
+            got, want,
+            "unit '{unit_suffix}' header '{header_suffix}': expected {want:?}, got {got:?}"
+        );
+    }
+
+    // shapes.cpp only includes shapes.h directly. geometry.h and vector3.h are
+    // reached through it and must not be classified for this unit.
+    let shapes = result
+        .unit_analysis
+        .iter()
+        .find(|(id, _)| resolve(strings, **id).ends_with("/shapes.cpp"))
+        .expect("shapes.cpp unit")
+        .1;
+    for suffix in ["include/geometry.h", "include/vector3.h"] {
+        let hid = header_id(strings, result, suffix).expect("transitive header");
+        assert!(
+            !shapes.header_usage.contains_key(&hid),
+            "'{suffix}' is transitive in shapes.cpp and must not be classified"
+        );
     }
 }
 

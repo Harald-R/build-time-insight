@@ -178,8 +178,9 @@ fn prune_analysis(analysis: &mut AnalysisResult, max_per_unit: usize, max_templa
         for chains in unit.header_inclusion_paths.values_mut() {
             keep_largest_chains(chains, MAX_CHAINS, |v| v);
         }
-        unit.header_usage
-            .retain(|header, _| kept_headers.contains(header));
+        // Do not prune `header_usage` with `kept_headers`: usage analysis
+        // discovers its own direct includes, which may have no parse-duration
+        // entry because the trace omitted them.
 
         // Keep the largest template instantiations.
         keep_largest(

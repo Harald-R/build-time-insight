@@ -280,17 +280,33 @@ impl AnalysisResult {
         }
         for analysis in per_unit_analysis.values() {
             for (header, usage) in &analysis.header_usage {
-                if let Some(header_analysis) = header_analysis.get_mut(header) {
-                    match usage {
-                        crate::header_usage::HeaderUsage::Unused => {
-                            header_analysis.unused_units += 1;
-                        }
-                        crate::header_usage::HeaderUsage::DeclarationOnly => {
-                            header_analysis.forward_declarable_units += 1;
-                        }
-                        crate::header_usage::HeaderUsage::NeedsDefinition => {
-                            header_analysis.definition_required_units += 1;
-                        }
+                // Usage analysis discovers direct includes from the compiler,
+                // so it can know about headers that clang's trace omitted
+                // (e.g. headers below -ftime-trace-granularity). Keep them in
+                // the aggregate even when no parse-duration entry exists. The
+                // duration loop already counted the units that have a trace
+                // entry; count the remaining direct includes here.
+                let has_parse_entry = analysis.header_parse_duration.contains_key(header);
+                let header_analysis = header_analysis.entry(*header).or_insert(HeaderAnalysis {
+                    parse_duration: 0,
+                    num_inclusions: 0,
+                    unused_units: 0,
+                    forward_declarable_units: 0,
+                    definition_required_units: 0,
+                    inclusion_paths: BTreeMap::new(),
+                });
+                if !has_parse_entry {
+                    header_analysis.num_inclusions += 1;
+                }
+                match usage {
+                    crate::header_usage::HeaderUsage::Unused => {
+                        header_analysis.unused_units += 1;
+                    }
+                    crate::header_usage::HeaderUsage::DeclarationOnly => {
+                        header_analysis.forward_declarable_units += 1;
+                    }
+                    crate::header_usage::HeaderUsage::NeedsDefinition => {
+                        header_analysis.definition_required_units += 1;
                     }
                 }
             }
@@ -349,7 +365,8 @@ fn is_source_file(path: &str) -> bool {
 ///
 /// Direct includes have an empty prefix in `header_inclusion_paths`. When no
 /// inclusion data is available (e.g. a trace without `Source` events), assume
-/// the header is direct so usage analysis still runs.
+/// the header is direct.
+#[cfg(test)]
 fn is_directly_included(unit: &UnitAnalysis, header: StringId) -> bool {
     match unit.header_inclusion_paths.get(&header) {
         Some(paths) => paths.keys().any(|chain| chain.is_empty()),
@@ -684,23 +701,13 @@ pub fn analyze_build_dir(
                 }
                 if header_usage {
                     let source = lock(shared).resolve(unit_id).to_string();
-                    let headers: Vec<String> = unit
-                        .header_parse_duration
-                        .keys()
-                        .filter(|h| is_directly_included(&unit, **h))
-                        .map(|h| lock(shared).resolve(*h).to_string())
-                        .filter(|h| !h.starts_with('/'))
-                        .collect();
-                    if !headers.is_empty() {
-                        for (header, usage) in crate::header_usage::analyze_unit_header_usage(
-                            &source,
-                            root_ref,
-                            &headers,
-                            compile_commands_ref,
-                        ) {
-                            let header_id = lock(shared).intern(&header);
-                            unit.header_usage.insert(header_id, usage);
-                        }
+                    for (header, usage) in crate::header_usage::analyze_unit_header_usage(
+                        &source,
+                        root_ref,
+                        compile_commands_ref,
+                    ) {
+                        let header_id = lock(shared).intern(&header);
+                        unit.header_usage.insert(header_id, usage);
                     }
                 }
                 Some((unit_id, unit))
@@ -1551,5 +1558,33 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
 
         assert!(err.to_string().contains("-ftime-trace"), "got: {err}");
+    }
+
+    #[test]
+    fn analysis_result_keeps_usage_only_headers() {
+        let mut interner = Interner::default();
+        let unused_h = interner.intern("unused.h");
+        let counted_h = interner.intern("counted.h");
+        let a_cpp = interner.intern("a.cpp");
+
+        let mut unit = unit_analysis(0);
+        unit.header_usage
+            .insert(unused_h, crate::header_usage::HeaderUsage::Unused);
+        unit.header_parse_duration = HashMap::from([(counted_h, 10)]);
+        unit.header_inclusion_paths
+            .insert(counted_h, BTreeMap::from([(Vec::new(), 1)]));
+        unit.header_usage
+            .insert(counted_h, crate::header_usage::HeaderUsage::DeclarationOnly);
+
+        let result = AnalysisResult::from(HashMap::from([(a_cpp, unit)]));
+
+        let unused = &result.header_analysis[&unused_h];
+        assert_eq!(unused.unused_units, 1);
+        assert_eq!(unused.parse_duration, 0);
+        assert_eq!(unused.num_inclusions, 1);
+
+        let counted = &result.header_analysis[&counted_h];
+        assert_eq!(counted.forward_declarable_units, 1);
+        assert_eq!(counted.num_inclusions, 1);
     }
 }
