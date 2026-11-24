@@ -1934,8 +1934,10 @@ Check your Browserslist config to be sure that your targets are set up correctly
                         .slice(0, 3)
                         .map(([prefix, count]) => {
                             const prefixLabels = prefix.map(x => s(x));
-                            const full = prefixLabels.length ? [...prefixLabels, header].join(' -> ') : header;
-                            return `<div class="text-xs text-gray-500 dark:text-gray-400">via ${esc(full)} (${count}x)</div>`;
+                            const label = prefixLabels.length
+                                ? `via ${esc([...prefixLabels, header].join(' -> '))}`
+                                : 'direct inclusion';
+                            return `<div class="text-xs text-gray-500 dark:text-gray-400">${label} (${count}x)</div>`;
                         })
                         .join('');
                     const avg = h.num_inclusions > 0 ? Math.floor(h.parse_duration / h.num_inclusions) : 0;
@@ -3607,9 +3609,11 @@ Check your Browserslist config to be sure that your targets are set up correctly
                 : Object.entries(h.inclusion_paths || {}))
                 .sort((a, b) => b[1] - a[1])
                 .map(([prefix, count]) => {
-                    const labels = [...prefix.map(x => s(x)), name];
-                    return `<tr class="border-b dark:border-gray-700" data-s0="${esc(labels.join(' -> '))}" data-s1="${count}">
-                        <td class="p-2 break-all">${esc(labels.join(' -> '))}</td>
+                    const label = prefix.length
+                        ? [...prefix.map(x => s(x)), name].join(' -> ')
+                        : 'direct inclusion';
+                    return `<tr class="border-b dark:border-gray-700" data-s0="${esc(label)}" data-s1="${count}">
+                        <td class="p-2 break-all">${esc(label)}</td>
                         <td class="p-2">${count}x</td>
                     </tr>`;
                 }).join('');

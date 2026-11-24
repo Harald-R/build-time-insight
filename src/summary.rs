@@ -197,6 +197,16 @@ fn format_ranked_row(metric: Seconds, total: Seconds, subject: &str) -> String {
     format!("{metric} ({})  {subject}", percent(metric, total))
 }
 
+/// Formats one inclusion chain, naming direct inclusions explicitly instead of
+/// repeating the header's own path.
+fn format_inclusion_path(path: &InclusionPath) -> String {
+    if path.chain.len() <= 1 {
+        "direct inclusion".to_string()
+    } else {
+        format!("via {}", path.chain.join(" -> "))
+    }
+}
+
 /// Formats one tool as `name version`.
 fn format_tool(tool: &Tool) -> String {
     if tool.version.is_empty() {
@@ -477,7 +487,7 @@ impl ReportSummary {
                 header.avg_inclusion_seconds
             );
             for path in &header.inclusion_paths {
-                println!("   {}× via {}", path.count, path.chain.join(" -> "));
+                println!("   {}× {}", path.count, format_inclusion_path(path));
             }
         }
     }
@@ -694,6 +704,17 @@ mod tests {
             format_ranked_row(Seconds(0.214749), Seconds(1.0), "src/main.cpp"),
             "214.749 ms (21.5%)  src/main.cpp"
         );
+
+        let direct = InclusionPath {
+            chain: vec!["a.h".to_string()],
+            count: 7,
+        };
+        assert_eq!(format_inclusion_path(&direct), "direct inclusion");
+        let indirect = InclusionPath {
+            chain: vec!["a.h".to_string(), "b.h".to_string()],
+            count: 1,
+        };
+        assert_eq!(format_inclusion_path(&indirect), "via a.h -> b.h");
 
         let template = TemplateSummary {
             kind: None,
