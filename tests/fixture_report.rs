@@ -77,10 +77,17 @@ fn assert_aggregation_invariants(strings: &[String], result: &AnalysisResult) {
         let mut sum = 0i64;
         let mut count = 0i64;
         for u in result.unit_analysis.values() {
-            if let Some(d) = u.header_parse_duration.get(hid) {
-                sum += d;
-                count += 1;
+            let chains = u.header_inclusion_paths.get(hid);
+            if !u.header_parse_duration.contains_key(hid) && chains.is_none() {
+                continue;
             }
+            sum += u.header_parse_duration.get(hid).copied().unwrap_or(0);
+            // One entry per `Source` span, not one per unit: a header can be
+            // entered several times in the same translation unit.
+            count += chains
+                .map(|chains| chains.values().copied().sum::<i64>())
+                .filter(|&n| n > 0)
+                .unwrap_or(1);
         }
         assert_eq!(
             h.parse_duration,
@@ -91,7 +98,7 @@ fn assert_aggregation_invariants(strings: &[String], result: &AnalysisResult) {
         assert_eq!(
             h.num_inclusions,
             count,
-            "header '{}' num_inclusions != number of including units",
+            "header '{}' num_inclusions != sum of per-unit inclusion events",
             resolve(strings, *hid)
         );
         let usage_total = h.unused_units + h.forward_declarable_units + h.definition_required_units;

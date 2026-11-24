@@ -236,16 +236,41 @@ impl AnalysisResult {
     ) -> HashMap<StringId, HeaderAnalysis> {
         let mut header_analysis: HashMap<StringId, HeaderAnalysis> = HashMap::new();
         for analysis in per_unit_analysis.values() {
-            for (header, duration) in &analysis.header_parse_duration {
+            // `header_parse_duration` has one entry per unit, but a header can be
+            // entered several times by the same unit (e.g. <bits/mathcalls.h> is
+            // pulled in repeatedly by <math.h>). `header_inclusion_paths` has one
+            // entry per `Source` span, so summing its counts gives the number of
+            // inclusions rather than the number of units. This runs before
+            // `Report::slim` prunes the chains, so the counts are still complete.
+            // Without chain data (the ParseDeclaration fallback), assume the unit
+            // included the header once.
+            let mut headers: Vec<StringId> =
+                analysis.header_parse_duration.keys().copied().collect();
+            headers.extend(analysis.header_inclusion_paths.keys().copied());
+            headers.sort_unstable();
+            headers.dedup();
+
+            for header in headers {
+                let duration = analysis
+                    .header_parse_duration
+                    .get(&header)
+                    .copied()
+                    .unwrap_or(0);
+                let num_inclusions = analysis
+                    .header_inclusion_paths
+                    .get(&header)
+                    .map(|chains| chains.values().copied().sum::<i64>())
+                    .filter(|&count| count > 0)
+                    .unwrap_or(1);
                 header_analysis
-                    .entry(*header)
+                    .entry(header)
                     .and_modify(|val| {
-                        val.parse_duration += *duration;
-                        val.num_inclusions += 1
+                        val.parse_duration += duration;
+                        val.num_inclusions += num_inclusions;
                     })
                     .or_insert(HeaderAnalysis {
-                        parse_duration: *duration,
-                        num_inclusions: 1,
+                        parse_duration: duration,
+                        num_inclusions,
                         unused_units: 0,
                         forward_declarable_units: 0,
                         definition_required_units: 0,
@@ -1104,12 +1129,39 @@ mod tests {
 
         let b_h_analysis = &result.header_analysis[&b_h];
         assert_eq!(b_h_analysis.parse_duration, 50);
-        assert_eq!(b_h_analysis.num_inclusions, 1);
+        // b.h is included once in a.cpp and twice in b.cpp, so the count comes
+        // from the inclusion chains, not from the number of TUs.
+        assert_eq!(b_h_analysis.num_inclusions, 3);
         assert_eq!(b_h_analysis.inclusion_paths[&vec![a_h]], 3);
 
         let c_h_analysis = &result.header_analysis[&c_h];
         assert_eq!(c_h_analysis.parse_duration, 30);
         assert_eq!(c_h_analysis.num_inclusions, 1);
+    }
+
+    #[test]
+    fn analysis_result_counts_each_header_inclusion_not_each_unit() {
+        let mut interner = Interner::default();
+        let repeated_h = interner.intern("repeated.h");
+        let a_cpp = interner.intern("a.cpp");
+        let b_cpp = interner.intern("b.cpp");
+
+        // a.cpp enters the header three times, b.cpp once.
+        let mut a = unit_analysis(0);
+        a.header_parse_duration = HashMap::from([(repeated_h, 300)]);
+        a.header_inclusion_paths
+            .insert(repeated_h, BTreeMap::from([(Vec::new(), 3)]));
+        let mut b = unit_analysis(0);
+        b.header_parse_duration = HashMap::from([(repeated_h, 100)]);
+        b.header_inclusion_paths
+            .insert(repeated_h, BTreeMap::from([(Vec::new(), 1)]));
+
+        let result = AnalysisResult::from(HashMap::from([(a_cpp, a), (b_cpp, b)]));
+
+        let analysis = &result.header_analysis[&repeated_h];
+        assert_eq!(analysis.parse_duration, 400);
+        assert_eq!(analysis.num_inclusions, 4);
+        assert_eq!(analysis.avg_inclusion_time(), 100);
     }
 
     #[test]
