@@ -1,10 +1,11 @@
 //! C++ build time analyzer.
 
+use anyhow::Context;
 use build_time_insight::report::{self, Report};
 use build_time_insight::summary::ReportSummary;
 
 use build_time_insight::{analyzer, build_info, cli, compare};
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Read};
 
 fn main() -> anyhow::Result<()> {
     reset_broken_pipe();
@@ -83,8 +84,56 @@ fn run_report(args: &cli::ReportArgs) -> anyhow::Result<()> {
 }
 
 fn run_compare(args: &cli::CompareArgs) -> anyhow::Result<()> {
-    let base = report::read_report(&args.base)?;
-    let target = report::read_report(&args.target)?;
-    compare::report_diff(&base, &target).print();
+    let diff = match &args.target {
+        Some(target) => {
+            let base = report::read_report(&args.base)?;
+            let target = report::read_report(target)?;
+            compare::report_diff(&base, &target)
+        }
+        None => read_yaml_comparison(&args.base)?,
+    };
+
+    match args.format {
+        cli::OutputFormat::Yaml => print!("{}", compare::yaml::to_string(&diff)?),
+        cli::OutputFormat::Text => {
+            diff.print_with(&render_options(args.all, args.only, args.limit));
+        }
+    }
     Ok(())
+}
+
+/// Reads a YAML comparison from `path`, or from stdin when it is `-`.
+fn read_yaml_comparison(path: &std::path::Path) -> anyhow::Result<compare::ReportDiff> {
+    if path.to_str() == Some("-") {
+        let mut input = String::new();
+        std::io::stdin().read_to_string(&mut input)?;
+        return Ok(compare::yaml::from_str(&input)?);
+    }
+
+    let bytes =
+        std::fs::read(path).with_context(|| format!("failed to read '{}'", path.display()))?;
+    if bytes.starts_with(&[0x1f, 0x8b]) {
+        anyhow::bail!(
+            "'{}' is a binary report; provide a target report to compare it against",
+            path.display()
+        );
+    }
+    let yaml = String::from_utf8(bytes)
+        .with_context(|| format!("'{}' is not a UTF-8 YAML comparison", path.display()))?;
+    Ok(compare::yaml::from_str(&yaml)?)
+}
+
+fn render_options(
+    all: bool,
+    only: Option<cli::ChangeFilter>,
+    limit: Option<usize>,
+) -> compare::RenderOptions {
+    compare::RenderOptions {
+        all,
+        only: only.map(|only| match only {
+            cli::ChangeFilter::Regressions => compare::Only::Regressions,
+            cli::ChangeFilter::Improvements => compare::Only::Improvements,
+        }),
+        limit,
+    }
 }

@@ -9,13 +9,18 @@ use std::{
     fmt,
 };
 
+use serde::{Deserialize, Serialize};
+
 use crate::analyzer::TemplateInstantiation;
 use crate::interner::StringId;
 use crate::report::Report;
 use crate::summary::Seconds;
 
+pub mod yaml;
+
 /// How an item's duration changed between two reports.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Change {
     /// The item exists only in the target report.
     Added,
@@ -27,6 +32,26 @@ pub enum Change {
     Faster,
     /// The item has the same duration in both reports.
     Unchanged,
+}
+
+/// Which changes to keep when rendering a comparison as text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Only {
+    /// Keep slower and added items.
+    Regressions,
+    /// Keep faster and removed items.
+    Improvements,
+}
+
+/// Controls how a comparison is rendered as text.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RenderOptions {
+    /// Include rows that did not change.
+    pub all: bool,
+    /// Restrict rows to regressions or improvements.
+    pub only: Option<Only>,
+    /// Maximum number of rows printed per section.
+    pub limit: Option<usize>,
 }
 
 /// One item's duration in the baseline and target reports.
@@ -209,10 +234,23 @@ impl HeaderDiff {
         &self.parse_duration.name
     }
 
+    /// Returns the change in parse time, or the inclusion direction when the
+    /// parse time did not change.
+    pub fn change(&self) -> Change {
+        let parse_change = self.parse_duration.change();
+        if parse_change != Change::Unchanged {
+            return parse_change;
+        }
+        match (self.base_inclusions, self.target_inclusions) {
+            (Some(base), Some(target)) if target > base => Change::Slower,
+            (Some(base), Some(target)) if target < base => Change::Faster,
+            _ => Change::Unchanged,
+        }
+    }
+
     /// Returns whether the parse time or the inclusion count changed.
     pub fn is_changed(&self) -> bool {
-        self.parse_duration.change() != Change::Unchanged
-            || self.base_inclusions != self.target_inclusions
+        self.change() != Change::Unchanged
     }
 
     /// Formats the change without the leading header name.
@@ -274,14 +312,19 @@ pub fn report_diff(base: &Report, target: &Report) -> ReportDiff {
 }
 
 impl ReportDiff {
-    /// Prints the comparison to the terminal, one section at a time.
+    /// Prints the comparison to the terminal using the default options.
     pub fn print(&self) {
+        self.print_with(&RenderOptions::default());
+    }
+
+    /// Prints the comparison to the terminal.
+    pub fn print_with(&self, options: &RenderOptions) {
         println!("Report comparison (base -> target)");
         self.print_totals();
-        self.print_targets();
-        self.print_headers();
-        self.print_templates();
-        self.print_units();
+        self.print_targets(options);
+        self.print_headers(options);
+        self.print_templates(options);
+        self.print_units(options);
     }
 
     fn print_totals(&self) {
@@ -293,52 +336,76 @@ impl ReportDiff {
         }
     }
 
-    fn print_targets(&self) {
+    fn print_targets(&self, options: &RenderOptions) {
         print_section("Targets (base -> target)");
         match &self.targets {
             None => println!("  (target data unavailable in one or both reports)"),
-            Some(targets) => print_changed_rows(targets, "(no target duration changes)"),
+            Some(targets) => {
+                let rows = filter_duration_rows(targets, options, false);
+                let empty = if options.only.is_some() {
+                    "(no matching target changes)"
+                } else {
+                    "(no target duration changes)"
+                };
+                print_duration_rows(&rows, empty);
+            }
         }
     }
 
-    fn print_headers(&self) {
+    fn print_headers(&self, options: &RenderOptions) {
         print_section("Headers (base -> target)");
-        let changed: Vec<&HeaderDiff> = self
+        let mut rows: Vec<&HeaderDiff> = self
             .headers
             .iter()
-            .filter(|header| header.is_changed())
+            .filter(|header| row_matches_header(header, options))
             .collect();
-        if changed.is_empty() {
-            println!("  (no header parse-time or inclusion changes)");
+        rows.sort_by(|a, b| compare_duration_diffs(&a.parse_duration, &b.parse_duration));
+        if let Some(limit) = options.limit {
+            rows.truncate(limit);
+        }
+        if rows.is_empty() {
+            if options.only.is_some() {
+                println!("  (no matching header changes)");
+            } else {
+                println!("  (no header parse-time or inclusion changes)");
+            }
             return;
         }
-        let width = changed
+        let width = rows
             .iter()
             .map(|header| header.name().chars().count())
             .max()
             .unwrap_or(0);
-        for header in changed {
+        for header in rows {
             println!("  {:<width$}  {}", header.name(), header.describe());
         }
     }
 
-    fn print_templates(&self) {
+    fn print_templates(&self, options: &RenderOptions) {
         print_section("Templates (base -> target)");
         let mut rows: Vec<(&str, &DurationDiff)> = Vec::new();
         rows.extend(
             self.function_templates
                 .iter()
-                .filter(|template| template.change() != Change::Unchanged)
+                .filter(|template| row_matches(template, options, false))
                 .map(|template| ("function", template)),
         );
         rows.extend(
             self.class_templates
                 .iter()
-                .filter(|template| template.change() != Change::Unchanged)
+                .filter(|template| row_matches(template, options, false))
                 .map(|template| ("class", template)),
         );
+        rows.sort_by(|a, b| compare_duration_diffs(a.1, b.1));
+        if let Some(limit) = options.limit {
+            rows.truncate(limit);
+        }
         if rows.is_empty() {
-            println!("  (no template instantiation changes)");
+            if options.only.is_some() {
+                println!("  (no matching template changes)");
+            } else {
+                println!("  (no template instantiation changes)");
+            }
             return;
         }
         let width = rows
@@ -355,21 +422,47 @@ impl ReportDiff {
         }
     }
 
-    fn print_units(&self) {
+    fn print_units(&self, options: &RenderOptions) {
         print_section("Per-unit total durations (base -> target)");
-        if self.units.is_empty() {
-            println!("  (no translation units in either report)");
-            return;
-        }
-        let width = self
-            .units
-            .iter()
-            .map(|unit| unit.name.chars().count())
-            .max()
-            .unwrap_or(0);
-        for unit in &self.units {
-            println!("  {:<width$}  {}", unit.name, unit.describe());
-        }
+        let rows = filter_duration_rows(&self.units, options, true);
+        let empty = if options.only.is_some() {
+            "(no matching unit changes)"
+        } else {
+            "(no translation units in either report)"
+        };
+        print_duration_rows(&rows, empty);
+    }
+}
+
+fn filter_duration_rows<'a>(
+    rows: &'a [DurationDiff],
+    options: &RenderOptions,
+    include_unchanged: bool,
+) -> Vec<&'a DurationDiff> {
+    let mut filtered: Vec<&DurationDiff> = rows
+        .iter()
+        .filter(|row| row_matches(row, options, include_unchanged))
+        .collect();
+    filtered.sort_by(|a, b| compare_duration_diffs(a, b));
+    if let Some(limit) = options.limit {
+        filtered.truncate(limit);
+    }
+    filtered
+}
+
+fn row_matches(row: &DurationDiff, options: &RenderOptions, include_unchanged: bool) -> bool {
+    match options.only {
+        Some(Only::Regressions) => matches!(row.change(), Change::Slower | Change::Added),
+        Some(Only::Improvements) => matches!(row.change(), Change::Faster | Change::Removed),
+        None => options.all || include_unchanged || row.change() != Change::Unchanged,
+    }
+}
+
+fn row_matches_header(header: &HeaderDiff, options: &RenderOptions) -> bool {
+    match options.only {
+        Some(Only::Regressions) => matches!(header.change(), Change::Slower | Change::Added),
+        Some(Only::Improvements) => matches!(header.change(), Change::Faster | Change::Removed),
+        None => options.all || header.is_changed(),
     }
 }
 
@@ -379,21 +472,17 @@ fn print_section(title: &str) {
     println!("{}", "─".repeat(title.chars().count()));
 }
 
-fn print_changed_rows(rows: &[DurationDiff], empty: &str) {
-    let changed: Vec<&DurationDiff> = rows
-        .iter()
-        .filter(|row| row.change() != Change::Unchanged)
-        .collect();
-    if changed.is_empty() {
+fn print_duration_rows(rows: &[&DurationDiff], empty: &str) {
+    if rows.is_empty() {
         println!("  {empty}");
         return;
     }
-    let width = changed
+    let width = rows
         .iter()
         .map(|row| row.name.chars().count())
         .max()
         .unwrap_or(0);
-    for row in changed {
+    for row in rows {
         println!("  {:<width$}  {}", row.name, row.describe());
     }
 }
@@ -855,6 +944,7 @@ mod tests {
             .find(|header| header.name() == "inclusions.h")
             .unwrap();
         assert!(inclusions.is_changed());
+        assert_eq!(inclusions.change(), Change::Slower);
         assert_eq!(inclusions.parse_duration.delta_micros(), Some(0));
         assert!(inclusions.describe().contains("inclusions 1 -> 4"));
 
@@ -864,6 +954,7 @@ mod tests {
             .find(|header| header.name() == "gone.h")
             .unwrap();
         assert_eq!(gone.parse_duration.change(), Change::Removed);
+        assert_eq!(gone.change(), Change::Removed);
         assert!(gone.is_changed());
 
         let new = diff
@@ -911,5 +1002,38 @@ mod tests {
 
         let no_targets = report_with_unit_durations(&[]);
         assert!(report_diff(&base, &no_targets).targets.is_none());
+    }
+
+    #[test]
+    fn render_filters_treat_added_and_removed_as_regressions_and_improvements() {
+        let added = DurationDiff::new("new", None, Some(10));
+        let removed = DurationDiff::new("old", Some(10), None);
+        let slower = DurationDiff::new("slower", Some(10), Some(20));
+        let faster = DurationDiff::new("faster", Some(20), Some(10));
+        let unchanged = DurationDiff::new("same", Some(10), Some(10));
+
+        let regressions = RenderOptions {
+            only: Some(Only::Regressions),
+            ..RenderOptions::default()
+        };
+        let improvements = RenderOptions {
+            only: Some(Only::Improvements),
+            ..RenderOptions::default()
+        };
+
+        assert!(row_matches(&added, &regressions, false));
+        assert!(row_matches(&slower, &regressions, false));
+        assert!(!row_matches(&faster, &regressions, false));
+        assert!(!row_matches(&unchanged, &regressions, false));
+
+        assert!(row_matches(&removed, &improvements, false));
+        assert!(row_matches(&faster, &improvements, false));
+        assert!(!row_matches(&slower, &improvements, false));
+        assert!(!row_matches(&unchanged, &improvements, false));
+
+        // Units include unchanged rows by default; other sections do not.
+        let defaults = RenderOptions::default();
+        assert!(row_matches(&unchanged, &defaults, true));
+        assert!(!row_matches(&unchanged, &defaults, false));
     }
 }

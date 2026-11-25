@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::thread;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 /// Default path the `analyze` command writes its report to.
 pub const DEFAULT_REPORT_PATH: &str = "report.bin";
@@ -37,7 +37,7 @@ pub enum Command {
     /// Read a report and print its results, or write them to JSON.
     Report(ReportArgs),
 
-    /// Compare two reports and print per-unit duration changes.
+    /// Compare two reports, or render a saved comparison, as text or YAML.
     Compare(CompareArgs),
 }
 
@@ -95,14 +95,50 @@ pub struct ReportArgs {
     pub json: Option<PathBuf>,
 }
 
+/// The format written to stdout by the compare command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum OutputFormat {
+    /// Human-readable text.
+    Text,
+    /// Canonical machine-readable YAML.
+    Yaml,
+}
+
+/// Which changes to keep when rendering text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ChangeFilter {
+    /// Slower and added rows.
+    Regressions,
+    /// Faster and removed rows.
+    Improvements,
+}
+
 /// Defines the arguments for the compare command.
 #[derive(Debug, Args)]
 pub struct CompareArgs {
-    /// Baseline report file.
+    /// Baseline report file, or a YAML comparison when TARGET is omitted.
     pub base: PathBuf,
 
     /// Report file to compare against the baseline.
-    pub target: PathBuf,
+    ///
+    /// Omit this when BASE is a YAML comparison or '-' for stdin.
+    pub target: Option<PathBuf>,
+
+    /// Format written to stdout.
+    #[arg(long, value_enum, default_value_t = OutputFormat::Text)]
+    pub format: OutputFormat,
+
+    /// Include unchanged rows in the text output.
+    #[arg(long)]
+    pub all: bool,
+
+    /// Show only regressions or improvements in the text output.
+    #[arg(long, value_enum)]
+    pub only: Option<ChangeFilter>,
+
+    /// Maximum number of rows printed per section.
+    #[arg(short, long, value_parser = parse_limit)]
+    pub limit: Option<usize>,
 }
 
 impl Cli {
@@ -357,7 +393,71 @@ mod tests {
             _ => panic!("expected Compare subcommand"),
         };
         assert_eq!(args.base, PathBuf::from("base.bin"));
-        assert_eq!(args.target, PathBuf::from("target.bin"));
+        assert_eq!(args.target, Some(PathBuf::from("target.bin")));
+        assert_eq!(args.format, OutputFormat::Text);
+        assert!(!args.all);
+        assert_eq!(args.only, None);
+        assert_eq!(args.limit, None);
+    }
+
+    #[test]
+    fn test_compare_accepts_single_yaml_input() {
+        let cli = Cli::try_parse_from(["build-time-insight", "compare", "diff.yaml"]).unwrap();
+        let args = match &cli.command {
+            Command::Compare(args) => args,
+            _ => panic!("expected Compare subcommand"),
+        };
+        assert_eq!(args.base, PathBuf::from("diff.yaml"));
+        assert_eq!(args.target, None);
+    }
+
+    #[test]
+    fn test_compare_accepts_yaml_and_render_options() {
+        let cli = Cli::try_parse_from([
+            "build-time-insight",
+            "compare",
+            "base.bin",
+            "target.bin",
+            "--format",
+            "yaml",
+            "--all",
+            "--only",
+            "regressions",
+            "--limit",
+            "5",
+        ])
+        .unwrap();
+        let args = match &cli.command {
+            Command::Compare(args) => args,
+            _ => panic!("expected Compare subcommand"),
+        };
+        assert_eq!(args.format, OutputFormat::Yaml);
+        assert!(args.all);
+        assert_eq!(args.only, Some(ChangeFilter::Regressions));
+        assert_eq!(args.limit, Some(5));
+    }
+
+    #[test]
+    fn test_compare_single_input_accepts_view_options_and_stdin() {
+        let cli = Cli::try_parse_from([
+            "build-time-insight",
+            "compare",
+            "-",
+            "--only",
+            "improvements",
+            "--limit",
+            "10",
+        ])
+        .unwrap();
+        let args = match &cli.command {
+            Command::Compare(args) => args,
+            _ => panic!("expected Compare subcommand"),
+        };
+        assert_eq!(args.base, PathBuf::from("-"));
+        assert_eq!(args.target, None);
+        assert_eq!(args.only, Some(ChangeFilter::Improvements));
+        assert_eq!(args.limit, Some(10));
+        assert!(!args.all);
     }
 
     #[test]
