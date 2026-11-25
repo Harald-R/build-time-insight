@@ -7,7 +7,7 @@ license = "MIT"
 description = "Analyzer for Clang -ftime-trace build profiles"
 repository = "https://github.com/Harald-R/build-time-insight"
 readme = "README.md"
-keywords = ["clang", "build-time", "profiling", "analysis", "ftime-trace", "cpp"]
+keywords = ["clang", "build-time", "profiling", "ftime-trace", "cpp"]
 categories = [
     "development-tools::build-utils",
     "development-tools::profiling",
