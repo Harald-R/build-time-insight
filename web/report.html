@@ -1782,6 +1782,10 @@ Check your Browserslist config to be sure that your targets are set up correctly
                     plugins: {
                         legend: { position: 'bottom' },
                         tooltip: {
+                            // The dashed 80% line is a threshold guide, not a
+                            // data point, so leave it out of the hover readout
+                            // while keeping it in the legend.
+                            filter: (item) => item.dataset.label !== '80% target',
                             callbacks: {
                                 title: (items) => s(rows[items[0].dataIndex][0]),
                                 label: (c) => config.label(c, rows[c.dataIndex][1]),
