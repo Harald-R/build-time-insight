@@ -27,7 +27,7 @@ pub struct Seconds(pub f64);
 
 impl Seconds {
     /// Converts a duration in microseconds.
-    fn from_micros(micros: i64) -> Self {
+    pub fn from_micros(micros: i64) -> Self {
         Seconds(micros as f64 / 1_000_000.0)
     }
 }

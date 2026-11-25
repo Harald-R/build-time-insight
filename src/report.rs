@@ -340,29 +340,6 @@ pub fn read_report(path: &Path) -> Result<Report, ReportError> {
     Ok(report)
 }
 
-/// Per-unit total duration differences (`target - base`), in microseconds,
-/// sorted from the largest regression to the largest improvement.
-pub fn unit_duration_diffs(base: &Report, target: &Report) -> Vec<(String, i64)> {
-    let mut diffs: Vec<(String, i64)> = target
-        .analysis
-        .unit_analysis
-        .iter()
-        .map(|(unit, analysis)| {
-            let unit_name = target.resolve(*unit);
-            let base_duration = base
-                .id_of(unit_name)
-                .and_then(|id| base.analysis.unit_analysis.get(&id))
-                .map_or(0, |a| a.total_duration);
-            (
-                unit_name.to_string(),
-                analysis.total_duration - base_duration,
-            )
-        })
-        .collect();
-    diffs.sort_by_key(|(_, diff)| std::cmp::Reverse(*diff));
-    diffs
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -580,18 +557,5 @@ mod tests {
         let read = read_report(&path).unwrap();
         assert_eq!(read.analysis.unit_analysis.len(), 1);
         std::fs::remove_file(path).ok();
-    }
-
-    #[test]
-    fn unit_duration_diffs_orders_by_regression() {
-        let base = report_with_unit_durations(&[("a.cpp", 100), ("b.cpp", 200)]);
-        let target = report_with_unit_durations(&[("a.cpp", 160), ("b.cpp", 180), ("c.cpp", 50)]);
-
-        let diffs = unit_duration_diffs(&base, &target);
-
-        assert_eq!(diffs.len(), 3);
-        assert_eq!(diffs[0], ("a.cpp".to_string(), 60));
-        assert_eq!(diffs[1], ("c.cpp".to_string(), 50));
-        assert_eq!(diffs[2], ("b.cpp".to_string(), -20));
     }
 }

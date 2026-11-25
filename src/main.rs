@@ -3,7 +3,7 @@
 use build_time_insight::report::{self, Report};
 use build_time_insight::summary::ReportSummary;
 
-use build_time_insight::{analyzer, build_info, cli};
+use build_time_insight::{analyzer, build_info, cli, compare};
 use std::io::IsTerminal;
 
 fn main() -> anyhow::Result<()> {
@@ -85,10 +85,21 @@ fn run_report(args: &cli::ReportArgs) -> anyhow::Result<()> {
 fn run_compare(args: &cli::CompareArgs) -> anyhow::Result<()> {
     let base = report::read_report(&args.base)?;
     let target = report::read_report(&args.target)?;
-    let diffs = report::unit_duration_diffs(&base, &target);
-    println!("Per-unit total duration changes (positive = slower):");
-    for (unit, diff) in &diffs {
-        println!("{unit}: {diff} us");
+    let diffs = compare::unit_duration_diffs(&base, &target);
+
+    println!("Per-unit total duration changes (base -> target):");
+    if diffs.is_empty() {
+        println!("  (no translation units in either report)");
+        return Ok(());
+    }
+
+    let unit_width = diffs
+        .iter()
+        .map(|diff| diff.unit.chars().count())
+        .max()
+        .unwrap_or(0);
+    for diff in &diffs {
+        println!("{:<unit_width$}  {}", diff.unit, diff.describe());
     }
     Ok(())
 }
