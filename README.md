@@ -117,6 +117,36 @@ build-time-insight report report.bin --limit 50
 build-time-insight report report.bin --json summary.json
 ```
 
+Example output, with paths shortened and some sections omitted:
+
+```text
+$ build-time-insight report report.bin --limit 3
+Build: CMake 4.3.4, Ninja 1.13.2, Clang 21.1.8, ...
+
+Totals
+──────
+  total: 993.766 ms
+  frontend: 951.158 ms
+  backend: 27.275 ms
+  other: 15.333 ms
+  template instantiation: 103.359 ms
+  translation units: 8
+  headers: 111
+
+Longest files to compile (3 of 8)
+─────────────────────────────────
+214.749 ms (21.6%)  src/main.cpp
+116.866 ms (11.8%)  src/edge/edge_diamond.cpp
+113.636 ms (11.4%)  src/geometry.cpp
+```
+
+### HTML visualization
+
+The repository includes a self-contained dashboard in `template.html`. Open it
+in a browser and load the gzip-compressed `report.bin` with drag-and-drop or the
+file picker. It shows totals, ranked units/headers/templates, header usage,
+inclusion graphs, and target graphs.
+
 ### Compare
 
 ```sh
@@ -158,6 +188,31 @@ build-time-insight compare - < diff.yaml
 # individual rows and build totals are checked.
 build-time-insight compare base.bin target.bin \
   --min-delta 1ms --min-percent 1 --fail-on-regression
+```
+
+Example output, with some sections omitted:
+
+```text
+$ build-time-insight compare base.bin target.bin --min-delta 1ms --min-percent 1
+Report comparison (base -> target)
+Summary: 2 regressions, 1 improvement, 0 added, 0 removed; total 8.120 s -> 8.560 s (+440.000 ms, +5.4%)
+
+Build totals (base -> target)
+─────────────────────────────
+  total                   8.120 s -> 8.560 s  +440.000 ms (+5.4%)  regression
+  frontend                7.400 s -> 7.700 s  +300.000 ms (+4.1%)  regression
+  backend                 500.000 ms -> 500.000 ms (unchanged)
+  other                   220.000 ms -> 360.000 ms  +140.000 ms (+63.6%)  regression
+  template instantiation  1.100 s -> 1.150 s  +50.000 ms (+4.5%)  regression
+
+Headers (base -> target)
+────────────────────────
+  include/geometry.h  91.200 ms -> 128.400 ms  +37.200 ms (+40.8%)  regression
+
+Per-unit total durations (base -> target)
+─────────────────────────────────────────
+  src/main.cpp       2.100 s -> 2.460 s  +360.000 ms (+17.1%)  regression
+  src/geometry.cpp   900.000 ms -> 850.000 ms  -50.000 ms (-5.6%)  improvement
 ```
 
 ## Typical workflow
