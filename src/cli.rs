@@ -139,6 +139,29 @@ pub struct CompareArgs {
     /// Maximum number of rows printed per section.
     #[arg(short, long, value_parser = parse_limit)]
     pub limit: Option<usize>,
+
+    /// Ignore duration changes smaller than this, e.g. 500us, 1ms, or 2s.
+    /// Defaults to 0.
+    #[arg(long, value_name = "DURATION", value_parser = parse_duration)]
+    pub min_delta: Option<i64>,
+
+    /// Ignore changes smaller than this percentage, e.g. 1 or 0.5.
+    /// Defaults to 0.
+    #[arg(long, value_name = "PERCENT", value_parser = parse_percent)]
+    pub min_percent: Option<f64>,
+
+    /// Ignore inclusion-count changes smaller than this. Defaults to 1.
+    #[arg(long, value_name = "COUNT", value_parser = parse_count)]
+    pub min_inclusions: Option<i64>,
+
+    /// Exit with status 1 when a significant regression is found.
+    ///
+    /// A regression is significant when it clears both the absolute floor
+    /// (`--min-delta`) and the relative floor (`--min-percent`). Header
+    /// inclusion-count changes use `--min-inclusions` instead. Build totals
+    /// are checked alongside individual rows.
+    #[arg(long)]
+    pub fail_on_regression: bool,
 }
 
 impl Cli {
@@ -200,6 +223,55 @@ fn parse_limit(s: &str) -> Result<usize, String> {
         return Err("limit must be at least 1".to_string());
     }
     Ok(n)
+}
+
+fn parse_duration(s: &str) -> Result<i64, String> {
+    let s = s.trim();
+    let (value, multiplier) = if let Some(value) = s.strip_suffix("ms") {
+        (value, 1_000.0)
+    } else if let Some(value) = s.strip_suffix("us").or_else(|| s.strip_suffix("µs")) {
+        (value, 1.0)
+    } else if let Some(value) = s.strip_suffix('s') {
+        (value, 1_000_000.0)
+    } else {
+        (s, 1.0)
+    };
+    let value: f64 = value
+        .trim()
+        .parse()
+        .map_err(|_| format!("'{s}' is not a valid duration"))?;
+    if !value.is_finite() || value < 0.0 {
+        return Err(format!("'{s}' is not a valid duration"));
+    }
+    let micros = value * multiplier;
+    if micros > i64::MAX as f64 {
+        return Err(format!("'{s}' is too large"));
+    }
+    Ok(micros.round() as i64)
+}
+
+fn parse_percent(s: &str) -> Result<f64, String> {
+    let value: f64 = s
+        .trim()
+        .trim_end_matches('%')
+        .trim()
+        .parse()
+        .map_err(|_| format!("'{s}' is not a valid percentage"))?;
+    if !value.is_finite() || value < 0.0 {
+        return Err(format!("'{s}' is not a valid percentage"));
+    }
+    Ok(value)
+}
+
+fn parse_count(s: &str) -> Result<i64, String> {
+    let count: i64 = s
+        .trim()
+        .parse()
+        .map_err(|_| format!("'{s}' is not a valid count"))?;
+    if count < 0 {
+        return Err("count must not be negative".to_string());
+    }
+    Ok(count)
 }
 
 /// Validates that a build directory argument exists and is a directory
@@ -398,6 +470,77 @@ mod tests {
         assert!(!args.all);
         assert_eq!(args.only, None);
         assert_eq!(args.limit, None);
+        assert_eq!(args.min_delta, None);
+        assert_eq!(args.min_percent, None);
+        assert_eq!(args.min_inclusions, None);
+        assert!(!args.fail_on_regression);
+    }
+
+    #[test]
+    fn test_compare_parses_thresholds_and_fail_flag() {
+        let cli = Cli::try_parse_from([
+            "build-time-insight",
+            "compare",
+            "base.bin",
+            "target.bin",
+            "--min-delta",
+            "1.5ms",
+            "--min-percent",
+            "1.5%",
+            "--min-inclusions",
+            "3",
+            "--fail-on-regression",
+        ])
+        .unwrap();
+        let args = match &cli.command {
+            Command::Compare(args) => args,
+            _ => panic!("expected Compare subcommand"),
+        };
+        assert_eq!(args.min_delta, Some(1500));
+        assert_eq!(args.min_percent, Some(1.5));
+        assert_eq!(args.min_inclusions, Some(3));
+        assert!(args.fail_on_regression);
+    }
+
+    #[test]
+    fn test_compare_parses_duration_units() {
+        for (input, expected) in [
+            ("500us", 500),
+            ("1ms", 1_000),
+            ("2s", 2_000_000),
+            ("250", 250),
+            ("1.5ms", 1_500),
+        ] {
+            let cli = Cli::try_parse_from([
+                "build-time-insight",
+                "compare",
+                "base.bin",
+                "target.bin",
+                "--min-delta",
+                input,
+            ])
+            .unwrap();
+            let args = match &cli.command {
+                Command::Compare(args) => args,
+                _ => panic!("expected Compare subcommand"),
+            };
+            assert_eq!(args.min_delta, Some(expected), "input: {input}");
+        }
+    }
+
+    #[test]
+    fn test_compare_rejects_negative_thresholds() {
+        for flag in ["--min-delta=-1", "--min-percent=-1", "--min-inclusions=-1"] {
+            let err = Cli::try_parse_from([
+                "build-time-insight",
+                "compare",
+                "base.bin",
+                "target.bin",
+                flag,
+            ])
+            .unwrap_err();
+            assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+        }
     }
 
     #[test]

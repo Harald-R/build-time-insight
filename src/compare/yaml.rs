@@ -3,15 +3,19 @@
 //! The YAML document is the canonical, machine-readable format. It stores the
 //! baseline and target durations plus derived values for convenience. Derived
 //! values are recomputed when the document is read back, so a hand-edited
-//! `change` or `delta_us` cannot make the rendered text inconsistent.
+//! `change`, `delta_us`, or `significant` cannot make the rendered text
+//! inconsistent.
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use super::{Change, DurationDiff, HeaderDiff, ReportDiff, TotalsDiff};
+use super::{Change, DurationDiff, HeaderDiff, ReportDiff, Thresholds, TotalsDiff};
 
 /// The schema version written by this build.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
+
+/// The oldest schema version this build can read.
+const MIN_SUPPORTED_VERSION: u32 = 1;
 
 /// A failure to read or write a YAML comparison.
 #[derive(Debug, Error)]
@@ -21,26 +25,38 @@ pub enum YamlError {
     Yaml(#[from] serde_yaml_ng::Error),
     /// Indicates a document written by an unsupported schema version.
     #[error(
-        "unsupported comparison schema version {found}; this build supports version {supported}"
+        "unsupported comparison schema version {found}; this build supports versions \
+         {MIN_SUPPORTED_VERSION} through {supported}"
     )]
     UnsupportedVersion { found: u32, supported: u32 },
 }
 
+/// A comparison read from YAML, including the thresholds stored in it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ComparisonDocument {
+    /// The comparison itself.
+    pub diff: ReportDiff,
+    /// Thresholds stored with the document.
+    pub thresholds: Thresholds,
+}
+
 /// Serializes a comparison to YAML.
-pub fn to_string(diff: &ReportDiff) -> Result<String, YamlError> {
-    Ok(serde_yaml_ng::to_string(&ReportDiffView::from(diff))?)
+pub fn to_string(diff: &ReportDiff, thresholds: &Thresholds) -> Result<String, YamlError> {
+    Ok(serde_yaml_ng::to_string(&ReportDiffView::from_diff(
+        diff, thresholds,
+    ))?)
 }
 
 /// Deserializes a comparison from YAML.
-pub fn from_str(yaml: &str) -> Result<ReportDiff, YamlError> {
+pub fn from_str(yaml: &str) -> Result<ComparisonDocument, YamlError> {
     let view: ReportDiffView = serde_yaml_ng::from_str(yaml)?;
-    if view.schema_version != SCHEMA_VERSION {
+    if !(MIN_SUPPORTED_VERSION..=SCHEMA_VERSION).contains(&view.schema_version) {
         return Err(YamlError::UnsupportedVersion {
             found: view.schema_version,
             supported: SCHEMA_VERSION,
         });
     }
-    Ok(ReportDiff::from(view))
+    Ok(view.into_document())
 }
 
 /// Derived duration fields shared by every row.
@@ -55,16 +71,20 @@ struct MetricView {
     /// Derived from `base_us` and `target_us` when read back.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     change: Option<Change>,
+    /// Derived from the thresholds when read back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    significant: Option<bool>,
 }
 
 impl MetricView {
-    fn from_diff(diff: &DurationDiff) -> Self {
+    fn from_diff(diff: &DurationDiff, thresholds: &Thresholds) -> Self {
         Self {
             base_us: diff.base_micros,
             target_us: diff.target_micros,
             delta_us: diff.delta_micros(),
             percent: diff.percent_change(),
             change: Some(diff.change()),
+            significant: Some(diff.is_significant(thresholds)),
         }
     }
 
@@ -82,10 +102,10 @@ struct NamedMetricView {
 }
 
 impl NamedMetricView {
-    fn from_diff(diff: &DurationDiff) -> Self {
+    fn from_diff(diff: &DurationDiff, thresholds: &Thresholds) -> Self {
         Self {
             name: diff.name.clone(),
-            metric: MetricView::from_diff(diff),
+            metric: MetricView::from_diff(diff, thresholds),
         }
     }
 
@@ -130,10 +150,14 @@ struct HeaderView {
 }
 
 impl HeaderView {
-    fn from_diff(header: &HeaderDiff) -> Self {
+    fn from_diff(header: &HeaderDiff, thresholds: &Thresholds) -> Self {
+        let mut metric = MetricView::from_diff(&header.parse_duration, thresholds);
+        // A header can be significant because of its inclusion count even when
+        // its parse time is below the duration threshold.
+        metric.significant = Some(header.is_significant(thresholds));
         Self {
             name: header.name().to_string(),
-            metric: MetricView::from_diff(&header.parse_duration),
+            metric,
             inclusions: InclusionsView::from_inclusions(
                 header.base_inclusions,
                 header.target_inclusions,
@@ -162,6 +186,21 @@ struct TotalsView {
     template_instantiation: MetricView,
 }
 
+impl TotalsView {
+    fn from_diff(totals: &TotalsDiff, thresholds: &Thresholds) -> Self {
+        Self {
+            total: MetricView::from_diff(&totals.total, thresholds),
+            frontend: MetricView::from_diff(&totals.frontend, thresholds),
+            backend: MetricView::from_diff(&totals.backend, thresholds),
+            other: MetricView::from_diff(&totals.other, thresholds),
+            template_instantiation: MetricView::from_diff(
+                &totals.template_instantiation,
+                thresholds,
+            ),
+        }
+    }
+}
+
 /// Template rows, separated by template kind.
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct TemplatesView {
@@ -175,6 +214,8 @@ struct TemplatesView {
 #[derive(Debug, Serialize, Deserialize)]
 struct ReportDiffView {
     schema_version: u32,
+    #[serde(default)]
+    thresholds: Thresholds,
     totals: TotalsView,
     #[serde(default)]
     targets: Option<Vec<NamedMetricView>>,
@@ -186,43 +227,47 @@ struct ReportDiffView {
     units: Vec<NamedMetricView>,
 }
 
-impl From<&ReportDiff> for ReportDiffView {
-    fn from(diff: &ReportDiff) -> Self {
+impl ReportDiffView {
+    fn from_diff(diff: &ReportDiff, thresholds: &Thresholds) -> Self {
         Self {
             schema_version: SCHEMA_VERSION,
-            totals: TotalsView {
-                total: MetricView::from_diff(&diff.totals.total),
-                frontend: MetricView::from_diff(&diff.totals.frontend),
-                backend: MetricView::from_diff(&diff.totals.backend),
-                other: MetricView::from_diff(&diff.totals.other),
-                template_instantiation: MetricView::from_diff(&diff.totals.template_instantiation),
-            },
-            targets: diff
-                .targets
-                .as_ref()
-                .map(|targets| targets.iter().map(NamedMetricView::from_diff).collect()),
-            headers: diff.headers.iter().map(HeaderView::from_diff).collect(),
+            thresholds: *thresholds,
+            totals: TotalsView::from_diff(&diff.totals, thresholds),
+            targets: diff.targets.as_ref().map(|targets| {
+                targets
+                    .iter()
+                    .map(|target| NamedMetricView::from_diff(target, thresholds))
+                    .collect()
+            }),
+            headers: diff
+                .headers
+                .iter()
+                .map(|header| HeaderView::from_diff(header, thresholds))
+                .collect(),
             templates: TemplatesView {
                 functions: diff
                     .function_templates
                     .iter()
-                    .map(NamedMetricView::from_diff)
+                    .map(|template| NamedMetricView::from_diff(template, thresholds))
                     .collect(),
                 classes: diff
                     .class_templates
                     .iter()
-                    .map(NamedMetricView::from_diff)
+                    .map(|template| NamedMetricView::from_diff(template, thresholds))
                     .collect(),
             },
-            units: diff.units.iter().map(NamedMetricView::from_diff).collect(),
+            units: diff
+                .units
+                .iter()
+                .map(|unit| NamedMetricView::from_diff(unit, thresholds))
+                .collect(),
         }
     }
-}
 
-impl From<ReportDiffView> for ReportDiff {
-    fn from(view: ReportDiffView) -> Self {
-        let totals = view.totals;
-        Self {
+    fn into_document(self) -> ComparisonDocument {
+        let thresholds = self.thresholds;
+        let totals = self.totals;
+        let diff = ReportDiff {
             totals: TotalsDiff {
                 total: totals.total.into_diff("total"),
                 frontend: totals.frontend.into_diff("frontend"),
@@ -232,31 +277,32 @@ impl From<ReportDiffView> for ReportDiff {
                     .template_instantiation
                     .into_diff("template instantiation"),
             },
-            targets: view.targets.map(|targets| {
+            targets: self.targets.map(|targets| {
                 targets
                     .into_iter()
                     .map(NamedMetricView::into_diff)
                     .collect()
             }),
-            headers: view.headers.into_iter().map(HeaderDiff::from).collect(),
-            function_templates: view
+            headers: self.headers.into_iter().map(HeaderDiff::from).collect(),
+            function_templates: self
                 .templates
                 .functions
                 .into_iter()
                 .map(NamedMetricView::into_diff)
                 .collect(),
-            class_templates: view
+            class_templates: self
                 .templates
                 .classes
                 .into_iter()
                 .map(NamedMetricView::into_diff)
                 .collect(),
-            units: view
+            units: self
                 .units
                 .into_iter()
                 .map(NamedMetricView::into_diff)
                 .collect(),
-        }
+        };
+        ComparisonDocument { diff, thresholds }
     }
 }
 
@@ -289,18 +335,30 @@ mod tests {
         }
     }
 
+    fn sample_thresholds() -> Thresholds {
+        Thresholds {
+            min_delta_us: 10,
+            min_percent: 1.0,
+            min_inclusions: 1,
+        }
+    }
+
     #[test]
     fn round_trips_through_yaml() {
         let diff = sample_diff();
-        let yaml = to_string(&diff).unwrap();
+        let thresholds = sample_thresholds();
+        let yaml = to_string(&diff, &thresholds).unwrap();
 
-        assert!(yaml.contains("schema_version: 1"));
+        assert!(yaml.contains("schema_version: 2"));
+        assert!(yaml.contains("min_delta_us: 10"));
         assert!(yaml.contains("base_us: 1000"));
         assert!(yaml.contains("change: slower"));
+        assert!(yaml.contains("significant:"));
         assert!(yaml.contains("inclusions:"));
 
-        let read = from_str(&yaml).unwrap();
-        assert_eq!(read, diff);
+        let document = from_str(&yaml).unwrap();
+        assert_eq!(document.diff, diff);
+        assert_eq!(document.thresholds, thresholds);
     }
 
     #[test]
@@ -314,21 +372,44 @@ mod tests {
     }
 
     #[test]
+    fn accepts_version_1_without_thresholds_or_significance() {
+        let yaml = "schema_version: 1\ntotals:\n  total: {base_us: 1, target_us: 2}\n  frontend: {base_us: 1, target_us: 2}\n  backend: {base_us: 1, target_us: 2}\n  other: {base_us: 1, target_us: 2}\n  template_instantiation: {base_us: 1, target_us: 2}\n";
+        let document = from_str(yaml).unwrap();
+        assert_eq!(document.thresholds, Thresholds::default());
+        assert_eq!(document.diff.totals.total.delta_micros(), Some(1));
+    }
+
+    #[test]
     fn recomputes_derived_fields_from_base_and_target() {
-        let yaml = "schema_version: 1\ntotals:\n  total: {base_us: 1, target_us: 2}\n  frontend: {base_us: 1, target_us: 2}\n  backend: {base_us: 1, target_us: 2}\n  other: {base_us: 1, target_us: 2}\n  template_instantiation: {base_us: 1, target_us: 2}\nunits:\n  - name: a.cpp\n    base_us: 100\n    target_us: 90\n    delta_us: 999\n    percent: 999.0\n    change: slower\n";
-        let diff = from_str(yaml).unwrap();
-        let unit = &diff.units[0];
+        let yaml = "schema_version: 1\ntotals:\n  total: {base_us: 1, target_us: 2}\n  frontend: {base_us: 1, target_us: 2}\n  backend: {base_us: 1, target_us: 2}\n  other: {base_us: 1, target_us: 2}\n  template_instantiation: {base_us: 1, target_us: 2}\nunits:\n  - name: a.cpp\n    base_us: 100\n    target_us: 90\n    delta_us: 999\n    percent: 999.0\n    change: slower\n    significant: true\n";
+        let document = from_str(yaml).unwrap();
+        let unit = &document.diff.units[0];
         assert_eq!(unit.change(), Change::Faster);
         assert_eq!(unit.delta_micros(), Some(-10));
         assert_eq!(unit.percent_change(), Some(-10.0));
     }
 
     #[test]
+    fn annotates_insignificant_changes() {
+        let mut diff = sample_diff();
+        diff.units = vec![DurationDiff::new("src/a.cpp", Some(100_000), Some(100_500))];
+        let thresholds = Thresholds {
+            min_delta_us: 1000,
+            min_percent: 0.1,
+            min_inclusions: 1,
+        };
+
+        let yaml = to_string(&diff, &thresholds).unwrap();
+        assert!(yaml.contains("significant: false"));
+        assert_eq!(from_str(&yaml).unwrap().thresholds, thresholds);
+    }
+
+    #[test]
     fn missing_targets_serializes_as_null_and_reads_back() {
         let mut diff = sample_diff();
         diff.targets = None;
-        let yaml = to_string(&diff).unwrap();
+        let yaml = to_string(&diff, &Thresholds::default()).unwrap();
         assert!(yaml.contains("targets: null"));
-        assert_eq!(from_str(&yaml).unwrap().targets, None);
+        assert_eq!(from_str(&yaml).unwrap().diff.targets, None);
     }
 }

@@ -6,9 +6,20 @@ use build_time_insight::summary::ReportSummary;
 
 use build_time_insight::{analyzer, build_info, cli, compare};
 use std::io::{IsTerminal, Read};
+use std::process::ExitCode;
 
-fn main() -> anyhow::Result<()> {
+fn main() -> ExitCode {
     reset_broken_pipe();
+    match run() {
+        Ok(code) => code,
+        Err(err) => {
+            eprintln!("Error: {err:?}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+fn run() -> anyhow::Result<ExitCode> {
     let cli = cli::Cli::parse();
     env_logger::Builder::from_env(
         env_logger::Env::default().default_filter_or(cli.log_level().to_string()),
@@ -17,8 +28,14 @@ fn main() -> anyhow::Result<()> {
 
     let quiet = cli.quiet;
     match cli.command {
-        cli::Command::Analyze(args) => run_analyze(&args, quiet),
-        cli::Command::Report(args) => run_report(&args),
+        cli::Command::Analyze(args) => {
+            run_analyze(&args, quiet)?;
+            Ok(ExitCode::SUCCESS)
+        }
+        cli::Command::Report(args) => {
+            run_report(&args)?;
+            Ok(ExitCode::SUCCESS)
+        }
         cli::Command::Compare(args) => run_compare(&args),
     }
 }
@@ -83,27 +100,55 @@ fn run_report(args: &cli::ReportArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn run_compare(args: &cli::CompareArgs) -> anyhow::Result<()> {
-    let diff = match &args.target {
+fn run_compare(args: &cli::CompareArgs) -> anyhow::Result<ExitCode> {
+    let (diff, mut thresholds) = match &args.target {
         Some(target) => {
             let base = report::read_report(&args.base)?;
             let target = report::read_report(target)?;
-            compare::report_diff(&base, &target)
+            (
+                compare::report_diff(&base, &target),
+                compare::Thresholds::default(),
+            )
         }
-        None => read_yaml_comparison(&args.base)?,
+        None => {
+            let document = read_yaml_comparison(&args.base)?;
+            (document.diff, document.thresholds)
+        }
     };
+    apply_threshold_overrides(&mut thresholds, args);
 
     match args.format {
-        cli::OutputFormat::Yaml => print!("{}", compare::yaml::to_string(&diff)?),
+        cli::OutputFormat::Yaml => {
+            print!("{}", compare::yaml::to_string(&diff, &thresholds)?);
+        }
         cli::OutputFormat::Text => {
-            diff.print_with(&render_options(args.all, args.only, args.limit));
+            diff.print_with(&render_options(args.all, args.only, args.limit, thresholds));
         }
     }
-    Ok(())
+
+    if args.fail_on_regression && diff.has_significant_regression(&thresholds) {
+        Ok(ExitCode::from(1))
+    } else {
+        Ok(ExitCode::SUCCESS)
+    }
+}
+
+fn apply_threshold_overrides(thresholds: &mut compare::Thresholds, args: &cli::CompareArgs) {
+    if let Some(min_delta) = args.min_delta {
+        thresholds.min_delta_us = min_delta;
+    }
+    if let Some(min_percent) = args.min_percent {
+        thresholds.min_percent = min_percent;
+    }
+    if let Some(min_inclusions) = args.min_inclusions {
+        thresholds.min_inclusions = min_inclusions;
+    }
 }
 
 /// Reads a YAML comparison from `path`, or from stdin when it is `-`.
-fn read_yaml_comparison(path: &std::path::Path) -> anyhow::Result<compare::ReportDiff> {
+fn read_yaml_comparison(
+    path: &std::path::Path,
+) -> anyhow::Result<compare::yaml::ComparisonDocument> {
     if path.to_str() == Some("-") {
         let mut input = String::new();
         std::io::stdin().read_to_string(&mut input)?;
@@ -127,6 +172,7 @@ fn render_options(
     all: bool,
     only: Option<cli::ChangeFilter>,
     limit: Option<usize>,
+    thresholds: compare::Thresholds,
 ) -> compare::RenderOptions {
     compare::RenderOptions {
         all,
@@ -135,5 +181,6 @@ fn render_options(
             cli::ChangeFilter::Improvements => compare::Only::Improvements,
         }),
         limit,
+        thresholds,
     }
 }

@@ -43,6 +43,34 @@ pub enum Only {
     Improvements,
 }
 
+/// Durations below these floors are treated as measurement noise.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Thresholds {
+    /// Minimum absolute duration change, in microseconds.
+    #[serde(default)]
+    pub min_delta_us: i64,
+    /// Minimum relative duration change, in percent.
+    #[serde(default)]
+    pub min_percent: f64,
+    /// Minimum change in inclusion count.
+    #[serde(default = "default_min_inclusions")]
+    pub min_inclusions: i64,
+}
+
+fn default_min_inclusions() -> i64 {
+    1
+}
+
+impl Default for Thresholds {
+    fn default() -> Self {
+        Self {
+            min_delta_us: 0,
+            min_percent: 0.0,
+            min_inclusions: 1,
+        }
+    }
+}
+
 /// Controls how a comparison is rendered as text.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RenderOptions {
@@ -52,6 +80,8 @@ pub struct RenderOptions {
     pub only: Option<Only>,
     /// Maximum number of rows printed per section.
     pub limit: Option<usize>,
+    /// Changes below these floors are hidden unless `all` is set.
+    pub thresholds: Thresholds,
 }
 
 /// One item's duration in the baseline and target reports.
@@ -108,6 +138,40 @@ impl DurationDiff {
         let base = self.base_micros?;
         let delta = self.delta_micros()?;
         (base != 0).then(|| delta as f64 / base as f64 * 100.0)
+    }
+
+    /// Returns whether this row is a regression (slower or added).
+    pub fn is_regression(&self) -> bool {
+        matches!(self.change(), Change::Slower | Change::Added)
+    }
+
+    /// Returns whether this row is an improvement (faster or removed).
+    pub fn is_improvement(&self) -> bool {
+        matches!(self.change(), Change::Faster | Change::Removed)
+    }
+
+    /// Returns whether this change clears the absolute and relative floors.
+    ///
+    /// Added and removed rows have no percentage, so the absolute floor
+    /// decides. A zero baseline also has no percentage and falls back to the
+    /// absolute floor.
+    pub fn is_significant(&self, thresholds: &Thresholds) -> bool {
+        let delta = match self.delta_micros() {
+            Some(delta) => delta.abs(),
+            None => self.target_micros.or(self.base_micros).unwrap_or(0).abs(),
+        };
+        if delta < thresholds.min_delta_us {
+            return false;
+        }
+        match self.percent_change() {
+            Some(percent) => percent.abs() >= thresholds.min_percent,
+            None => true,
+        }
+    }
+
+    /// Returns whether this row is a regression that clears the thresholds.
+    pub fn is_significant_regression(&self, thresholds: &Thresholds) -> bool {
+        self.is_regression() && self.is_significant(thresholds)
     }
 
     /// Formats the change without the leading item name, so callers can align
@@ -253,6 +317,36 @@ impl HeaderDiff {
         self.change() != Change::Unchanged
     }
 
+    /// Returns whether this header is a regression (slower or added).
+    pub fn is_regression(&self) -> bool {
+        matches!(self.change(), Change::Slower | Change::Added)
+    }
+
+    /// Returns whether this header is an improvement (faster or removed).
+    pub fn is_improvement(&self) -> bool {
+        matches!(self.change(), Change::Faster | Change::Removed)
+    }
+
+    /// Returns whether the parse-time change or the inclusion-count change
+    /// clears its respective threshold.
+    pub fn is_significant(&self, thresholds: &Thresholds) -> bool {
+        let parse_changed = self.parse_duration.change() != Change::Unchanged;
+        let parse_significant = parse_changed && self.parse_duration.is_significant(thresholds);
+        let inclusions_significant = match (self.base_inclusions, self.target_inclusions) {
+            (Some(base), Some(target)) => {
+                target != base && (target - base).abs() >= thresholds.min_inclusions
+            }
+            // Added or removed headers have no comparable count.
+            _ => true,
+        };
+        parse_significant || inclusions_significant
+    }
+
+    /// Returns whether this header is a regression that clears the thresholds.
+    pub fn is_significant_regression(&self, thresholds: &Thresholds) -> bool {
+        self.is_regression() && self.is_significant(thresholds)
+    }
+
     /// Formats the change without the leading header name.
     pub fn describe(&self) -> String {
         let mut text = self.parse_duration.describe();
@@ -312,6 +406,35 @@ pub fn report_diff(base: &Report, target: &Report) -> ReportDiff {
 }
 
 impl ReportDiff {
+    /// Returns whether the comparison contains any significant regression.
+    ///
+    /// Totals are included, so many individually small regressions that add up
+    /// to a significant build-wide increase still fail the check.
+    pub fn has_significant_regression(&self, thresholds: &Thresholds) -> bool {
+        self.totals
+            .rows()
+            .iter()
+            .any(|row| row.is_significant_regression(thresholds))
+            || self.targets.as_deref().is_some_and(|targets| {
+                targets
+                    .iter()
+                    .any(|target| target.is_significant_regression(thresholds))
+            })
+            || self
+                .headers
+                .iter()
+                .any(|header| header.is_significant_regression(thresholds))
+            || self
+                .function_templates
+                .iter()
+                .chain(self.class_templates.iter())
+                .any(|template| template.is_significant_regression(thresholds))
+            || self
+                .units
+                .iter()
+                .any(|unit| unit.is_significant_regression(thresholds))
+    }
+
     /// Prints the comparison to the terminal using the default options.
     pub fn print(&self) {
         self.print_with(&RenderOptions::default());
@@ -342,7 +465,7 @@ impl ReportDiff {
             None => println!("  (target data unavailable in one or both reports)"),
             Some(targets) => {
                 let rows = filter_duration_rows(targets, options, false);
-                let empty = if options.only.is_some() {
+                let empty = if filters_rows(options) {
                     "(no matching target changes)"
                 } else {
                     "(no target duration changes)"
@@ -364,7 +487,7 @@ impl ReportDiff {
             rows.truncate(limit);
         }
         if rows.is_empty() {
-            if options.only.is_some() {
+            if filters_rows(options) {
                 println!("  (no matching header changes)");
             } else {
                 println!("  (no header parse-time or inclusion changes)");
@@ -401,7 +524,7 @@ impl ReportDiff {
             rows.truncate(limit);
         }
         if rows.is_empty() {
-            if options.only.is_some() {
+            if filters_rows(options) {
                 println!("  (no matching template changes)");
             } else {
                 println!("  (no template instantiation changes)");
@@ -425,7 +548,7 @@ impl ReportDiff {
     fn print_units(&self, options: &RenderOptions) {
         print_section("Per-unit total durations (base -> target)");
         let rows = filter_duration_rows(&self.units, options, true);
-        let empty = if options.only.is_some() {
+        let empty = if filters_rows(options) {
             "(no matching unit changes)"
         } else {
             "(no translation units in either report)"
@@ -450,19 +573,27 @@ fn filter_duration_rows<'a>(
     filtered
 }
 
+fn filters_rows(options: &RenderOptions) -> bool {
+    !options.all && (options.only.is_some() || options.thresholds != Thresholds::default())
+}
+
 fn row_matches(row: &DurationDiff, options: &RenderOptions, include_unchanged: bool) -> bool {
+    let significant = row.is_significant(&options.thresholds);
     match options.only {
-        Some(Only::Regressions) => matches!(row.change(), Change::Slower | Change::Added),
-        Some(Only::Improvements) => matches!(row.change(), Change::Faster | Change::Removed),
-        None => options.all || include_unchanged || row.change() != Change::Unchanged,
+        Some(Only::Regressions) => row.is_regression() && (options.all || significant),
+        Some(Only::Improvements) => row.is_improvement() && (options.all || significant),
+        None => {
+            options.all || (include_unchanged || row.change() != Change::Unchanged) && significant
+        }
     }
 }
 
 fn row_matches_header(header: &HeaderDiff, options: &RenderOptions) -> bool {
+    let significant = header.is_significant(&options.thresholds);
     match options.only {
-        Some(Only::Regressions) => matches!(header.change(), Change::Slower | Change::Added),
-        Some(Only::Improvements) => matches!(header.change(), Change::Faster | Change::Removed),
-        None => options.all || header.is_changed(),
+        Some(Only::Regressions) => header.is_regression() && (options.all || significant),
+        Some(Only::Improvements) => header.is_improvement() && (options.all || significant),
+        None => options.all || (header.is_changed() && significant),
     }
 }
 
@@ -1035,5 +1166,71 @@ mod tests {
         let defaults = RenderOptions::default();
         assert!(row_matches(&unchanged, &defaults, true));
         assert!(!row_matches(&unchanged, &defaults, false));
+    }
+
+    #[test]
+    fn significance_requires_both_absolute_and_relative_floors() {
+        let thresholds = Thresholds {
+            min_delta_us: 1_000,
+            min_percent: 1.0,
+            min_inclusions: 1,
+        };
+
+        // 500 us on 100 ms: below the absolute floor.
+        let tiny_absolute = DurationDiff::new("tiny", Some(100_000), Some(100_500));
+        assert!(!tiny_absolute.is_significant(&thresholds));
+
+        // 5 ms on 1 s: clears the absolute floor but not the relative one.
+        let small_relative = DurationDiff::new("relative", Some(1_000_000), Some(1_005_000));
+        assert!(!small_relative.is_significant(&thresholds));
+
+        // 10 ms on 10 ms: clears both floors.
+        let clear = DurationDiff::new("clear", Some(10_000), Some(20_000));
+        assert!(clear.is_significant(&thresholds));
+
+        assert!(!DurationDiff::new("added-small", None, Some(500)).is_significant(&thresholds));
+        assert!(DurationDiff::new("added-large", None, Some(5_000)).is_significant(&thresholds));
+    }
+
+    #[test]
+    fn header_significance_covers_inclusion_only_changes() {
+        let thresholds = Thresholds {
+            min_delta_us: 1_000,
+            min_percent: 1.0,
+            min_inclusions: 1,
+        };
+        let header = HeaderDiff {
+            parse_duration: DurationDiff::new("a.h", Some(10_000), Some(10_000)),
+            base_inclusions: Some(1),
+            target_inclusions: Some(3),
+        };
+
+        assert!(!header.parse_duration.is_significant(&thresholds));
+        assert!(header.is_significant(&thresholds));
+        assert!(header.is_significant_regression(&thresholds));
+
+        // An inclusion-only change is still governed by its own floor, even
+        // when the duration thresholds are zero.
+        let larger_inclusion_floor = Thresholds {
+            min_delta_us: 0,
+            min_percent: 0.0,
+            min_inclusions: 3,
+        };
+        assert!(!header.is_significant(&larger_inclusion_floor));
+    }
+
+    #[test]
+    fn regression_gating_uses_thresholds_and_totals() {
+        let base = report_with_unit_durations(&[("a.cpp", 100_000)]);
+        let target = report_with_unit_durations(&[("a.cpp", 100_500)]);
+        let diff = report_diff(&base, &target);
+
+        let noisy = Thresholds {
+            min_delta_us: 1_000,
+            min_percent: 0.1,
+            min_inclusions: 1,
+        };
+        assert!(!diff.has_significant_regression(&noisy));
+        assert!(diff.has_significant_regression(&Thresholds::default()));
     }
 }
