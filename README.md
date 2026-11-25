@@ -10,16 +10,16 @@ or regressed between two reports. With this in mind, the tool could also be
 deployed in CI environments for tracking the build performance over time.
 
 <p align="center">
-  <a href="docs/images/report-overview.png">
-    <img src="docs/images/report-overview.png" width="32%"
+  <a href="https://raw.githubusercontent.com/Harald-R/build-time-insight/main/docs/images/report-overview.png">
+    <img src="https://raw.githubusercontent.com/Harald-R/build-time-insight/main/docs/images/report-overview.png" width="32%"
          alt="HTML report overview with duration breakdown, build configuration, and compile-time Pareto chart">
   </a>
-  <a href="docs/images/report-headers.png">
-    <img src="docs/images/report-headers.png" width="32%"
+  <a href="https://raw.githubusercontent.com/Harald-R/build-time-insight/main/docs/images/report-headers.png">
+    <img src="https://raw.githubusercontent.com/Harald-R/build-time-insight/main/docs/images/report-headers.png" width="32%"
          alt="HTML report Headers tab with a header parse-time Pareto chart and include suggestions">
   </a>
-  <a href="docs/images/report-unit.png">
-    <img src="docs/images/report-unit.png" width="32%"
+  <a href="https://raw.githubusercontent.com/Harald-R/build-time-insight/main/docs/images/report-unit.png">
+    <img src="https://raw.githubusercontent.com/Harald-R/build-time-insight/main/docs/images/report-unit.png" width="32%"
          alt="HTML report translation unit detail with frontend/backend split, header usage, and template instantiations">
   </a>
 </p>
