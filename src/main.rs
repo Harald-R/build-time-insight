@@ -89,10 +89,10 @@ fn run_report(args: &cli::ReportArgs) -> anyhow::Result<()> {
     let limit = args.limit();
     let report = report::read_report(&args.report)?;
     let summary = ReportSummary::from_report(&report, limit);
-    match &args.json {
+    match &args.yaml {
         Some(path) => {
-            let file = std::fs::File::create(path)?;
-            serde_json::to_writer_pretty(std::io::BufWriter::new(file), &summary)?;
+            let yaml = serde_yaml_ng::to_string(&summary)?;
+            std::fs::write(path, yaml)?;
             println!("Wrote report summary to {}", path.display());
         }
         None => summary.print(limit),

@@ -34,7 +34,7 @@ pub enum Command {
     /// Analyze a build directory and write a portable report.
     Analyze(AnalyzeArgs),
 
-    /// Read a report and print its results, or write them to JSON.
+    /// Read a report and print its results, or write them to YAML.
     Report(ReportArgs),
 
     /// Compare two reports, or render a saved comparison, as text or YAML.
@@ -95,9 +95,9 @@ pub struct ReportArgs {
     #[arg(short, long, value_parser = parse_limit)]
     pub limit: Option<usize>,
 
-    /// Write the results to this JSON file instead of printing them.
+    /// Write the results to this YAML file instead of printing them.
     #[arg(long)]
-    pub json: Option<PathBuf>,
+    pub yaml: Option<PathBuf>,
 }
 
 /// The format written to stdout by the compare command.
@@ -408,18 +408,18 @@ mod tests {
     }
 
     #[test]
-    fn test_report_command_parses_file_and_json() {
+    fn test_report_command_parses_file_and_yaml() {
         let cli = Cli::try_parse_from([
             "build-time-insight",
             "report",
             "Cargo.toml",
-            "--json",
-            "/tmp/summary.json",
+            "--yaml",
+            "/tmp/summary.yaml",
         ])
         .unwrap();
         let args = report_args(&cli);
         assert_eq!(args.report, PathBuf::from("Cargo.toml"));
-        assert_eq!(args.json, Some(PathBuf::from("/tmp/summary.json")));
+        assert_eq!(args.yaml, Some(PathBuf::from("/tmp/summary.yaml")));
     }
 
     #[test]

@@ -31,7 +31,7 @@ deployed in CI environments for tracking the build performance over time.
    `**/*.cpp.json`. Each trace is parsed into an event tree and aggregated per
    translation unit, header, and template.
 2. The result is written as a gzip-compressed MessagePack report.
-3. `report` resolves the report and prints a summary or writes it as JSON.
+3. `report` resolves the report and prints a summary or writes it as YAML.
 4. `compare` matches items by resolved path/name across two reports, computes
    durations and deltas, and renders either text or canonical YAML.
 
@@ -115,8 +115,8 @@ build-time-insight report report.bin
 # Show 50 entries in each list.
 build-time-insight report report.bin --limit 50
 
-# Write the resolved summary as JSON instead of printing it.
-build-time-insight report report.bin --json summary.json
+# Write the resolved summary as YAML instead of printing it.
+build-time-insight report report.bin --yaml summary.yaml
 ```
 
 Example output, with paths shortened and some sections omitted:
