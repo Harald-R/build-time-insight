@@ -443,11 +443,76 @@ impl ReportDiff {
     /// Prints the comparison to the terminal.
     pub fn print_with(&self, options: &RenderOptions) {
         println!("Report comparison (base -> target)");
+        println!("{}", self.summary_line(options));
         self.print_totals();
         self.print_targets(options);
         self.print_headers(options);
         self.print_templates(options);
         self.print_units(options);
+    }
+
+    /// Returns a one-line aggregate summary of the comparison.
+    ///
+    /// Counts cover targets, headers, templates, and units. Rows that fall
+    /// below the configured thresholds are excluded unless `all` is set. Both
+    /// directions are counted even when `only` restricts the printed sections.
+    pub fn summary_line(&self, options: &RenderOptions) -> String {
+        let counts = self.change_counts(options);
+        let scope = if !options.all && options.thresholds != Thresholds::default() {
+            "Summary (significant only)"
+        } else {
+            "Summary"
+        };
+        format!(
+            "{scope}: {}, {}, {} added, {} removed; total {}",
+            count_noun(counts.regressions, "regression", "regressions"),
+            count_noun(counts.improvements, "improvement", "improvements"),
+            counts.added,
+            counts.removed,
+            self.total_summary()
+        )
+    }
+
+    fn change_counts(&self, options: &RenderOptions) -> ChangeCounts {
+        let mut counts = ChangeCounts::default();
+        if let Some(targets) = &self.targets {
+            for target in targets {
+                counts.record(target, options);
+            }
+        }
+        for header in &self.headers {
+            let change = header.change();
+            if change == Change::Unchanged {
+                continue;
+            }
+            if !options.all && !header.is_significant(&options.thresholds) {
+                continue;
+            }
+            counts.add(change);
+        }
+        for template in self
+            .function_templates
+            .iter()
+            .chain(self.class_templates.iter())
+        {
+            counts.record(template, options);
+        }
+        for unit in &self.units {
+            counts.record(unit, options);
+        }
+        counts
+    }
+
+    fn total_summary(&self) -> String {
+        let total = &self.totals.total;
+        let base = Seconds::from_micros(total.base_micros.unwrap_or(0));
+        let target = Seconds::from_micros(total.target_micros.unwrap_or(0));
+        let delta = total.delta_micros().unwrap_or(0);
+        let mut details = format_signed_micros(delta);
+        if let Some(percent) = total.percent_change() {
+            details.push_str(&format!(", {percent:+.1}%"));
+        }
+        format!("{base} -> {target} ({details})")
     }
 
     fn print_totals(&self) {
@@ -571,6 +636,41 @@ fn filter_duration_rows<'a>(
         filtered.truncate(limit);
     }
     filtered
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct ChangeCounts {
+    regressions: usize,
+    improvements: usize,
+    added: usize,
+    removed: usize,
+}
+
+impl ChangeCounts {
+    fn record(&mut self, diff: &DurationDiff, options: &RenderOptions) {
+        let change = diff.change();
+        if change == Change::Unchanged {
+            return;
+        }
+        if !options.all && !diff.is_significant(&options.thresholds) {
+            return;
+        }
+        self.add(change);
+    }
+
+    fn add(&mut self, change: Change) {
+        match change {
+            Change::Slower => self.regressions += 1,
+            Change::Faster => self.improvements += 1,
+            Change::Added => self.added += 1,
+            Change::Removed => self.removed += 1,
+            Change::Unchanged => {}
+        }
+    }
+}
+
+fn count_noun(count: usize, singular: &str, plural: &str) -> String {
+    format!("{count} {}", if count == 1 { singular } else { plural })
 }
 
 fn filters_rows(options: &RenderOptions) -> bool {
@@ -1232,5 +1332,81 @@ mod tests {
         };
         assert!(!diff.has_significant_regression(&noisy));
         assert!(diff.has_significant_regression(&Thresholds::default()));
+    }
+
+    fn diff_with_units(units: Vec<DurationDiff>, totals: (i64, i64)) -> ReportDiff {
+        let (base, target) = totals;
+        ReportDiff {
+            totals: TotalsDiff {
+                total: DurationDiff::new("total", Some(base), Some(target)),
+                frontend: DurationDiff::new("frontend", Some(base), Some(target)),
+                backend: DurationDiff::new("backend", Some(0), Some(0)),
+                other: DurationDiff::new("other", Some(0), Some(0)),
+                template_instantiation: DurationDiff::new(
+                    "template instantiation",
+                    Some(0),
+                    Some(0),
+                ),
+            },
+            targets: None,
+            headers: Vec::new(),
+            function_templates: Vec::new(),
+            class_templates: Vec::new(),
+            units,
+        }
+    }
+
+    #[test]
+    fn summary_line_counts_changes_and_total() {
+        let diff = diff_with_units(
+            vec![
+                DurationDiff::new("slower", Some(100), Some(200)),
+                DurationDiff::new("faster", Some(200), Some(100)),
+                DurationDiff::new("added", None, Some(50)),
+                DurationDiff::new("removed", Some(50), None),
+                DurationDiff::new("same", Some(10), Some(10)),
+            ],
+            (1_000, 1_500),
+        );
+
+        assert_eq!(
+            diff.summary_line(&RenderOptions::default()),
+            "Summary: 1 regression, 1 improvement, 1 added, 1 removed; \
+             total 1.000 ms -> 1.500 ms (+500 us, +50.0%)"
+        );
+    }
+
+    #[test]
+    fn summary_line_respects_thresholds_and_all() {
+        let diff = diff_with_units(
+            vec![
+                DurationDiff::new("noise", Some(100_000), Some(100_500)),
+                DurationDiff::new("real", Some(100_000), Some(102_000)),
+            ],
+            (1_000, 2_000),
+        );
+        let thresholds = Thresholds {
+            min_delta_us: 1_000,
+            min_percent: 1.0,
+            min_inclusions: 1,
+        };
+
+        let filtered = RenderOptions {
+            thresholds,
+            ..RenderOptions::default()
+        };
+        assert!(diff.summary_line(&filtered).starts_with(
+            "Summary (significant only): 1 regression, 0 improvements, 0 added, 0 removed; total"
+        ));
+
+        let all = RenderOptions {
+            all: true,
+            thresholds,
+            ..RenderOptions::default()
+        };
+        assert!(
+            diff.summary_line(&all)
+                .starts_with("Summary: 2 regressions, 0 improvements, 0 added, 0 removed; total")
+        );
     }
 }
