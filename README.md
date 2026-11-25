@@ -9,6 +9,21 @@ It should also help with analyzing whether the build duration has improved
 or regressed between two reports. With this in mind, the tool could also be
 deployed in CI environments for tracking the build performance over time.
 
+<p align="center">
+  <a href="docs/images/report-overview.png">
+    <img src="docs/images/report-overview.png" width="32%"
+         alt="HTML report overview with duration breakdown, build configuration, and compile-time Pareto chart">
+  </a>
+  <a href="docs/images/report-headers.png">
+    <img src="docs/images/report-headers.png" width="32%"
+         alt="HTML report Headers tab with a header parse-time Pareto chart and include suggestions">
+  </a>
+  <a href="docs/images/report-unit.png">
+    <img src="docs/images/report-unit.png" width="32%"
+         alt="HTML report translation unit detail with frontend/backend split, header usage, and template instantiations">
+  </a>
+</p>
+
 > Note: The portable report format is not yet frozen, as the tool is still in
 > development. As such, there is no guarantee that the tool will be able to
 > parse reports generated with older versions, as of now. The intention is to
@@ -146,7 +161,7 @@ Longest files to compile (3 of 8)
 
 The repository includes a self-contained dashboard in `web/report.html`. It shows
 totals, ranked units/headers/templates, header usage, inclusion graphs, and
-target graphs.
+target graphs. Examples of the report can be seen in [these images](#build-time-insight).
 
 The dashboard is published to [here](https://harald-r.github.io/build-time-insight).
 Open the page and load a gzip-compressed `report.bin` with drag-and-drop or the
