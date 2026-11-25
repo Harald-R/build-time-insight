@@ -144,10 +144,14 @@ Longest files to compile (3 of 8)
 
 ### HTML visualization
 
-The repository includes a self-contained dashboard in `report.html`. Open it
-in a browser and load the gzip-compressed `report.bin` with drag-and-drop or the
-file picker. It shows totals, ranked units/headers/templates, header usage,
-inclusion graphs, and target graphs.
+The repository includes a self-contained dashboard in `web/report.html`. It shows
+totals, ranked units/headers/templates, header usage, inclusion graphs, and
+target graphs.
+
+The dashboard is published to [here](https://harald-r.github.io/build-time-insight).
+Open the page and load a gzip-compressed `report.bin` with drag-and-drop or the
+file picker. Loaded reports stay in the browser; no report data is uploaded.
+`web/report.html` can also be opened directly for local use.
 
 ### Compare
 
