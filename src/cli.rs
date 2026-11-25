@@ -60,8 +60,13 @@ pub struct AnalyzeArgs {
     #[arg(short, long)]
     pub exclude: Vec<String>,
 
-    /// Analyze which directly included headers are unused, only need
-    /// declarations, or require definitions.
+    /// Classify directly included project headers as unused, declaration-only,
+    /// or definition-required, using the compiler and flags from
+    /// `compile_commands.json`.
+    ///
+    /// This re-runs the compiler for every translation unit, so it is
+    /// significantly slower than trace-only analysis and consumes more memory.
+    /// Reduce `--jobs` if needed.
     #[arg(long)]
     pub header_usage: bool,
 

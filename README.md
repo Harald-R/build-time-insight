@@ -94,7 +94,9 @@ build-time-insight analyze build/ -o report.bin
 # worker threads to 4.
 build-time-insight analyze build/ -j 4
 
-# Analyze the traces from the `build` directory and classify the headers included.
+# Analyze the traces from the `build` directory and classify the headers included as
+# unused, declaration-only, or definition-required, using the compiler and flags from
+# `compile_commands.json`.
 # Note: This re-runs the compiler for every translation unit, so it is significantly
 # slower than trace-only analysis. It also consumes more memory, so the number of
 # parallel jobs may need to be limited.
