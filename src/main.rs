@@ -85,21 +85,6 @@ fn run_report(args: &cli::ReportArgs) -> anyhow::Result<()> {
 fn run_compare(args: &cli::CompareArgs) -> anyhow::Result<()> {
     let base = report::read_report(&args.base)?;
     let target = report::read_report(&args.target)?;
-    let diffs = compare::unit_duration_diffs(&base, &target);
-
-    println!("Per-unit total duration changes (base -> target):");
-    if diffs.is_empty() {
-        println!("  (no translation units in either report)");
-        return Ok(());
-    }
-
-    let unit_width = diffs
-        .iter()
-        .map(|diff| diff.unit.chars().count())
-        .max()
-        .unwrap_or(0);
-    for diff in &diffs {
-        println!("{:<unit_width$}  {}", diff.unit, diff.describe());
-    }
+    compare::report_diff(&base, &target).print();
     Ok(())
 }
