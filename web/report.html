@@ -552,8 +552,6 @@ Check your Browserslist config to be sure that your targets are set up correctly
                             <div class="max-w-md mx-auto h-48">
                                 <canvas id="durationChart"></canvas>
                             </div>
-                            <div id="pie-caption" class="text-xs text-gray-500 mt-2 text-center dark:text-gray-400">
-                            </div>
                         </div>
 
                         <div class="bg-white p-4 rounded-lg shadow dark:bg-gray-800">
@@ -1610,6 +1608,10 @@ Check your Browserslist config to be sure that your targets are set up correctly
                 templates += u.template_instantiation_duration || 0;
             }
             const other = Math.max(0, total - frontend - backend);
+            // Template instantiation is part of the frontend, not a fourth
+            // slice, so it is shown relative to the frontend time in the
+            // frontend slice's tooltip.
+            const templatePct = frontend > 0 ? (100 * templates / frontend) : 0;
 
             const centerText = {
                 id: 'centerText',
@@ -1665,16 +1667,20 @@ Check your Browserslist config to be sure that your targets are set up correctly
                         },
                         tooltip: {
                             callbacks: {
-                                label: (c) => `${c.label}: ${fmtDuration(c.parsed)} (${(100 * c.parsed / Math.max(1, total)).toFixed(1)}%)`
+                                label: (c) => {
+                                    const line = `${c.label}: ${fmtDuration(c.parsed)} (${(100 * c.parsed / Math.max(1, total)).toFixed(1)}%)`;
+                                    if (c.label !== 'Frontend' || templates <= 0) return line;
+                                    return [
+                                        line,
+                                        `  of which template instantiation: ${fmtDuration(templates)} (${templatePct.toFixed(1)}% of frontend)`,
+                                    ];
+                                }
                             }
                         },
                     },
                 },
                 plugins: [centerText],
             });
-
-            document.getElementById('pie-caption').textContent =
-                `Template instantiation: ${fmtDuration(templates)} (included in the frontend/backend slices)`;
 
             const headerCount = Object.keys(state.headers).length;
             const tplCount = [...Object.values(state.fnTemplates), ...Object.values(state.classTemplates)]
