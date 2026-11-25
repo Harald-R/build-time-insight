@@ -246,3 +246,7 @@ build-time-insight compare base.bin target.bin \
   `--max-templates` values can hide data from later comparisons.
 - The binary report is an internal, compressed format. Regenerate reports
   rather than editing them by hand.
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
