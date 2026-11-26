@@ -109,6 +109,29 @@ Notes:
 - Keep the build directory inside the repository so `--header-usage` path
   relativization works (the analyzer's `project_root` runs `git rev-parse`).
 
+## Committing build directories
+
+Run the sanitizer after building if the directories should be tracked:
+
+```
+./sanitize-build-dirs.py
+```
+
+It keeps only the analyzer inputs and rewrites machine-local data:
+
+- keeps `*.cpp.json` traces, `compile_commands.json`, `build.ninja`, a minimal
+  `CMakeCache.txt`, and `CMakeFiles/<cmake-version>/CMakeCXXCompiler.cmake`;
+- removes object files, archives, binaries, `.ninja_log`, `.ninja_deps`, CMake
+  compiler-detection output, and configuration logs;
+- makes project paths relative to the repository and build directory;
+- replaces Nix store hashes with `000…000`, `/run/current-system` with a
+  neutral store path, and home-directory names with `user`;
+- normalizes PIDs/thread IDs and `beginningOfTime` in traces.
+
+`--header-usage` still works on the sanitized directories: the compiler is
+stored as `clang++`, so it is taken from `PATH`, while source and include paths
+are resolved relative to the project root.
+
 ## Analyze
 
 ```
