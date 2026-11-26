@@ -67,7 +67,6 @@ fn run_analyze(args: &cli::AnalyzeArgs, quiet: bool) -> anyhow::Result<()> {
     log::info!("Jobs: {}", jobs);
 
     let build_info = build_info::extract_build_info(&build_dir);
-    log::info!("Build info: {:#?}", build_info);
 
     let analysis = analyzer::analyze_build_dir(
         &build_dir,

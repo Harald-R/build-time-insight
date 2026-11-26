@@ -264,7 +264,7 @@ fn parse_compiler_cmake_file(compiler_file_content: &str, toolchain: &mut Toolch
             toolchain.linker.get_or_insert_default().version = val.to_string();
         }
     }
-    log::info!("{:#?}", toolchain);
+    log::debug!("{:#?}", toolchain);
 }
 
 fn git_commit_from_output(success: bool, git_command_out: Vec<u8>) -> Option<String> {
