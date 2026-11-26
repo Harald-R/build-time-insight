@@ -320,7 +320,14 @@ fn parse_direct_includes(stderr: &[u8], directory: &str, root: Option<&str>) -> 
 /// AST dump uses the same paths as the `-H` include list. Committed fixture
 /// databases store these paths relative to the build directory.
 fn absolutize_path_arg(directory: &str, arg: &str) -> String {
-    for prefix in ["-I", "-isystem", "-iquote", "-idirafter", "-include", "-imacros"] {
+    for prefix in [
+        "-I",
+        "-isystem",
+        "-iquote",
+        "-idirafter",
+        "-include",
+        "-imacros",
+    ] {
         if let Some(rest) = arg.strip_prefix(prefix)
             && !rest.is_empty()
             && !Path::new(rest).is_absolute()
@@ -1206,7 +1213,10 @@ mod tests {
             Some("/repo"),
             &Some(compile_commands),
         );
-        assert_eq!(invocation.directory, "/repo/tests/data/cpp-project/build-clang-18");
+        assert_eq!(
+            invocation.directory,
+            "/repo/tests/data/cpp-project/build-clang-18"
+        );
         assert_eq!(invocation.source, "/repo/tests/data/cpp-project/src/a.cpp");
         assert_eq!(
             invocation.flags,
