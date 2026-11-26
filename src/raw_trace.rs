@@ -61,5 +61,6 @@ pub struct TraceEventFile {
     /// Trace events in the file.
     pub trace_events: Vec<TraceEvent>,
     /// Beginning time of the trace, in microseconds.
+    #[serde(default)]
     pub beginning_of_time: i64,
 }

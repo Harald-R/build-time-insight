@@ -827,10 +827,10 @@ mod tests {
         let json = r#"{
             "traceEvents": [
                 { "name": "Frontend", "ph": "X", "pid": 1, "tid": 1, "ts": 2833, "dur": 2819761 }
-            ],
-            "beginningOfTime": 0
+            ]
         }"#;
-        let file = deserialize_trace_event_file(json.as_bytes()).unwrap();
+        let file: TraceEventFile = deserialize_trace_event_file(json.as_bytes()).unwrap();
+        assert_eq!(file.beginning_of_time, 0);
         let event = &file.trace_events[0];
         assert_eq!(event.cat, None);
         assert_eq!(event.id, None);
