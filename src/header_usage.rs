@@ -82,10 +82,25 @@ impl CompileCommands {
         }
     }
 
-    fn for_source(&self, absolute_source: &str) -> Option<&CompileCommand> {
-        self.entries
-            .iter()
-            .find(|entry| entry.file == absolute_source)
+    fn for_source(&self, absolute_source: &str, root: Option<&str>) -> Option<&CompileCommand> {
+        self.entries.iter().find(|entry| {
+            resolve_entry_path(root, &entry.directory, &entry.file) == absolute_source
+        })
+    }
+}
+
+/// Resolves a compile-command path. Committed fixture databases use paths
+/// relative to the project root; CMake databases use absolute paths.
+fn resolve_entry_path(root: Option<&str>, directory: &str, path: &str) -> String {
+    if Path::new(path).is_absolute() {
+        return path.to_string();
+    }
+    if Path::new(directory).is_absolute() {
+        return format!("{}/{}", directory.trim_end_matches('/'), path);
+    }
+    match root {
+        Some(root) => format!("{}/{}", root.trim_end_matches('/'), path),
+        None => path.to_string(),
     }
 }
 
@@ -134,7 +149,7 @@ impl Invocation {
 
         let Some(entry) = compile_commands
             .as_ref()
-            .and_then(|cc| cc.for_source(&absolute_source))
+            .and_then(|cc| cc.for_source(&absolute_source, root))
         else {
             return Self {
                 compiler: std::env::var("CXX").unwrap_or_else(|_| "clang++".to_string()),
@@ -152,6 +167,7 @@ impl Invocation {
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "clang++".to_string());
 
+        let directory = resolve_entry_path(root, "", &entry.directory);
         let mut flags = Vec::new();
         let mut skip_next = false;
         for arg in argv {
@@ -182,13 +198,13 @@ impl Invocation {
                 {
                     continue;
                 }
-                _ => flags.push(arg),
+                _ => flags.push(absolutize_path_arg(&directory, &arg)),
             }
         }
 
         Self {
             compiler,
-            directory: entry.directory.clone(),
+            directory,
             flags,
             source: absolute_source,
         }
@@ -298,6 +314,22 @@ fn parse_direct_includes(stderr: &[u8], directory: &str, root: Option<&str>) -> 
         }
     }
     includes
+}
+
+/// Makes relative path arguments (`-I../include`, etc.) absolute so clang's
+/// AST dump uses the same paths as the `-H` include list. Committed fixture
+/// databases store these paths relative to the build directory.
+fn absolutize_path_arg(directory: &str, arg: &str) -> String {
+    for prefix in ["-I", "-isystem", "-iquote", "-idirafter", "-include", "-imacros"] {
+        if let Some(rest) = arg.strip_prefix(prefix)
+            && !rest.is_empty()
+            && !Path::new(rest).is_absolute()
+        {
+            let absolute = format!("{}/{}", directory.trim_end_matches('/'), rest);
+            return format!("{prefix}{}", clean_absolute_path(&absolute));
+        }
+    }
+    arg.to_string()
 }
 
 /// Removes `.` and `..` components from an absolute path without touching the
@@ -1152,6 +1184,34 @@ mod tests {
     fn run(ast: serde_json::Value, source: &str, headers: &[&str]) -> Vec<(String, HeaderUsage)> {
         let headers: Vec<String> = headers.iter().map(|s| s.to_string()).collect();
         header_usage_from_ast(&ast.to_string().into_bytes(), None, source, &headers)
+    }
+
+    #[test]
+    fn invocation_resolves_relative_compile_commands() {
+        let compile_commands = CompileCommands {
+            entries: vec![CompileCommand {
+                directory: "tests/data/cpp-project/build-clang-18".to_string(),
+                file: "tests/data/cpp-project/src/a.cpp".to_string(),
+                arguments: Some(vec![
+                    "clang++".to_string(),
+                    "-I../include".to_string(),
+                    "-c".to_string(),
+                    "tests/data/cpp-project/src/a.cpp".to_string(),
+                ]),
+                command: None,
+            }],
+        };
+        let invocation = Invocation::for_source(
+            "tests/data/cpp-project/src/a.cpp",
+            Some("/repo"),
+            &Some(compile_commands),
+        );
+        assert_eq!(invocation.directory, "/repo/tests/data/cpp-project/build-clang-18");
+        assert_eq!(invocation.source, "/repo/tests/data/cpp-project/src/a.cpp");
+        assert_eq!(
+            invocation.flags,
+            vec!["-I/repo/tests/data/cpp-project/include"]
+        );
     }
 
     #[test]

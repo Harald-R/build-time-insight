@@ -72,7 +72,7 @@ pub fn build(
     }
 
     // Target per source, from the compile commands.
-    let source_target = load_source_targets(build_dir);
+    let source_target = load_source_targets(build_dir, root);
 
     // Sum the durations per target.
     let mut per_target: HashMap<String, (i64, usize)> = HashMap::new();
@@ -411,6 +411,8 @@ fn is_library(base: &str) -> bool {
 #[derive(Deserialize)]
 struct CompileCommand {
     #[serde(default)]
+    directory: String,
+    #[serde(default)]
     file: String,
     #[serde(default)]
     command: String,
@@ -418,9 +420,24 @@ struct CompileCommand {
     arguments: Option<Vec<String>>,
 }
 
+/// Resolves the source path from a compile command. Committed fixture databases
+/// use project-root-relative paths; CMake databases use absolute paths.
+fn compile_command_source(directory: &str, file: &str, root: Option<&str>) -> String {
+    if Path::new(file).is_absolute() {
+        return file.to_string();
+    }
+    if Path::new(directory).is_absolute() {
+        return format!("{}/{}", directory.trim_end_matches('/'), file);
+    }
+    match root {
+        Some(root) => format!("{}/{}", root.trim_end_matches('/'), file),
+        None => file.to_string(),
+    }
+}
+
 /// Maps each absolute source path to its target, from the compile commands.
 /// The target comes from the object path `CMakeFiles/<target>.dir/...`.
-fn load_source_targets(build_dir: &str) -> HashMap<String, String> {
+fn load_source_targets(build_dir: &str, root: Option<&str>) -> HashMap<String, String> {
     let path = Path::new(build_dir).join("compile_commands.json");
     let Some(commands) = read_json::<Vec<CompileCommand>>(&path) else {
         return HashMap::new();
@@ -434,7 +451,10 @@ fn load_source_targets(build_dir: &str) -> HashMap<String, String> {
         if let Some(output) = find_output(&args)
             && let Some(target) = target_from_object_path(&output)
         {
-            map.insert(cmd.file.clone(), target);
+            map.insert(
+                compile_command_source(&cmd.directory, &cmd.file, root),
+                target,
+            );
         }
     }
     map
@@ -498,6 +518,26 @@ mod tests {
             Some("geometry_lib")
         );
         assert_eq!(target_from_object_path("src/main.cpp.o"), None);
+    }
+
+    #[test]
+    fn resolves_relative_compile_command_sources() {
+        assert_eq!(
+            compile_command_source(
+                "tests/data/cpp-project/build-clang-18",
+                "tests/data/cpp-project/src/a.cpp",
+                Some("/repo"),
+            ),
+            "/repo/tests/data/cpp-project/src/a.cpp"
+        );
+        assert_eq!(
+            compile_command_source("/build", "src/a.cpp", None),
+            "/build/src/a.cpp"
+        );
+        assert_eq!(
+            compile_command_source("", "/abs/src/a.cpp", Some("/repo")),
+            "/abs/src/a.cpp"
+        );
     }
 
     #[test]
