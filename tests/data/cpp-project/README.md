@@ -11,7 +11,7 @@ against the expected values below.
 ```
 cpp-project/
 ├── CMakeLists.txt       # C++17; exports compile_commands.json; ENABLE_FTIME_TRACE=ON adds -ftime-trace
-├── build-traces.sh      # configure + build (build dir inside the repo)
+├── build-traces.sh      # configure + build (conda or Nix)
 ├── include/
 │   ├── vector3.h        # class template Vector3<T> (instantiates in many units)
 │   ├── geometry.h       # non-template declarations; includes vector3.h
@@ -27,17 +27,6 @@ cpp-project/
     ├── main.cpp         # driver; instantiates the project templates
 ```
 
-**8 translation units.** Include relationships create these inclusion chains:
-
-- `geometry.cpp`                 -> `geometry.h` -> `vector3.h`
-- `shapes.cpp`                   -> `shapes.h` -> `geometry.h` -> `vector3.h` (+ `utils.h`)
-- `main.cpp`                     -> `geometry.h`, `shapes.h`, `utils.h`
-- `src/edge/edge_unused.cpp`     -> `unused.h`, `geometry.h` -> `vector3.h`, `shapes.h`
-- `src/edge/edge_fwd.cpp`        -> `fwd_class.h`, `geometry.h` -> `vector3.h`
-- `src/edge/edge_needs.cpp`      -> `fwd_class.h`, `geometry.h` -> `vector3.h`
-- `src/edge/edge_diamond.cpp`    -> `diamond_a.h`, `geometry.h` -> `vector3.h`
-- `src/edge/edge_diamond2.cpp`   -> `diamond_b.h` -> `diamond_a.h`, `geometry.h` -> `vector3.h`
-
 ## Building the traces
 
 ```
@@ -47,64 +36,76 @@ cpp-project/
 Requires `clang++` and `CMake`/`Ninja`. Produces `*.cpp.json` trace files
 plus `compile_commands.json` (needed by `--header-usage`).
 
-## Building with multiple clang versions (conda)
+## Building with multiple clang versions
 
-`--build-all` builds the fixture with every clang version. For each version it
-creates the conda env `bti-clang<NN>` (clang, CMake, Ninja) if it does not
-exist yet, then builds inside that env into `build-clang-<NN>`:
-
-```
-./build-traces.sh --build-all
-./build-traces.sh --build-all myprefix-     # custom directory prefix
-BTI_CLANG_VERSIONS="16 20" ./build-traces.sh --build-all   # custom versions
-```
-
-Or enter an environment and build a single version manually:
+Selecting a backend with `--conda` or `--nix` builds the fixture with every
+version in the `--versions` list (default `21.1.8 22.1.8`). Each build goes
+into `<prefix><version>` (default prefix `build-clang-`). Without a backend the
+script only performs a single build with the `clang++` on `PATH`.
 
 ```
-conda activate bti-clang18
-./build-traces.sh build-clang18
-build-time-insight analyze build-clang18 --header-usage
+./build-traces.sh --conda
+./build-traces.sh --nix
+./build-traces.sh --conda myprefix-     # custom directory prefix
+./build-traces.sh --conda --versions "16 20"   # custom versions
+```
+
+### Conda
+
+For each version the script creates the conda env `bti-clang<version>` (clang,
+CMake, Ninja) if it does not exist yet, then builds inside that env:
+
+```
+./build-traces.sh --conda
+./build-traces.sh --conda --versions "16 20"
 ```
 
 Notes:
-- `--build-all` creates each env with `clang`, then runs the build inside the **activated**
-  env so the C++ standard-library paths are set up.
+- `--conda` creates each env with `clang`, then runs the build inside the
+  **activated** env so the C++ standard-library paths are set up.
 - Keep the build directory inside the repository so `--header-usage` path
   relativization works (the analyzer's `project_root` runs `git rev-parse`).
 
-## Building the traces
+### Nix / NixOS
+
+On NixOS (or any system with Nix flakes enabled), pass `--nix` to use clang,
+CMake and Ninja from nixpkgs instead of conda:
 
 ```
-./build-traces.sh [<dir>]    # By default, builds in `./build-traces`, unless a custom directory is provided
+./build-traces.sh --nix
+./build-traces.sh --nix myprefix-
+./build-traces.sh --nix --versions "18 20 22"
 ```
 
-Requires `clang++` and `CMake`/`Ninja`. Produces `*.cpp.json` trace files
-plus `compile_commands.json` (needed by `--header-usage`).
-
-## Building with multiple clang versions (conda)
-
-`--build-all` builds the fixture with every clang version. For each version it
-creates the conda env `bti-clang<NN>` (clang, CMake, Ninja) if it does not
-exist yet, then builds inside that env:
+For each version the script runs the build inside:
 
 ```
-./build-traces.sh --build-all
-./build-traces.sh --build-all myprefix-     # custom directory prefix
-BTI_CLANG_VERSIONS="16 20" ./build-traces.sh --build-all   # custom versions
+nix shell <nixpkgs>#llvmPackages_<major>.clang <nixpkgs>#cmake <nixpkgs>#ninja
 ```
 
-Or enter an environment and build a single version manually:
+Versions may be full (`21.1.8`) or major-only (`21`); nixpkgs selects the patch
+release it provides for that major.
+
+nixpkgs only keeps the LLVM versions it still maintains; current nixpkgs
+provides LLVM 18 and newer. To build every clang from 9 onward:
 
 ```
-conda activate bti-clang18
-./build-traces.sh build-clang18
-build-time-insight analyze build-clang18 --header-usage
+BTI_NIXPKGS=github:NixOS/nixpkgs/nixos-23.11 \
+    ./build-traces.sh --nix --versions "9 10 11"
+
+BTI_NIXPKGS=github:NixOS/nixpkgs/nixos-24.05 \
+    ./build-traces.sh --nix --versions "12 13 14 15 16 17"
+
+BTI_NIXPKGS=github:NixOS/nixpkgs/nixos-25.05 \
+    ./build-traces.sh --nix --versions "18 19 20 21"
+
+BTI_NIXPKGS=github:NixOS/nixpkgs/nixpkgs-unstable \
+    ./build-traces.sh --nix --versions "22 23"
 ```
 
 Notes:
-- `--build-all` prepends each env's `bin` dir to `PATH`, so cmake picks up that
-  env's clang++, CMake and Ninja without `conda activate`.
+- `--conda` and `--nix` (or `--backend conda|nix`) select the backend and
+  trigger a multi-version build. One of them is required for that mode.
 - Keep the build directory inside the repository so `--header-usage` path
   relativization works (the analyzer's `project_root` runs `git rev-parse`).
 
