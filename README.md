@@ -56,10 +56,13 @@ the CMake File API or the Ninja build file.
 
 ## Requirements
 
-- A recent stable Rust toolchain (edition 2024)
-- Clang, for producing traces with `-ftime-trace`
-- `compile_commands.json` for `--header-usage` and for source-to-target mapping
-- CMake File API output or a Ninja build file for target timings
+If building the tool from source, a recent stable Rust toolchain (edition 2024)
+is needed.
+
+For the tool, the following are needed:
+- Clang, for producing traces with `-ftime-trace` or running with `--header-usage`
+- `compile_commands.json`, for `--header-usage` and source-to-target mapping
+- CMake File API output or a Ninja build file, for target timings
 
 ## Build
 
