@@ -1354,6 +1354,23 @@ mod tests {
     }
 
     #[test]
+    fn analyze_extracts_headers_from_uncategorized_source_spans() {
+        // clang 18 emits complete "Source" events without a category.
+        let trace = file_trace(
+            Some("src/main.cpp"),
+            vec![
+                x_event("Frontend", 1, 1, 0, 1000),
+                x_event_detail("Source", 1, 1, 100, 300, "src/app.h:5:1"),
+            ],
+        );
+        let (interner, _, unit) = analyze_unit_with(trace);
+        assert_eq!(
+            unit.header_parse_duration[&intern(&interner, "src/app.h")],
+            300
+        );
+    }
+
+    #[test]
     fn analyze_counts_nested_and_extensionless_headers() {
         let trace = file_trace(
             Some("src/main.cpp"),

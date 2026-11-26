@@ -127,6 +127,18 @@ pub enum LoopControl {
     Break,
 }
 
+// Clang 18 and older emit "Source" spans as complete "X" events without a
+// category; clang 19+ emits them as async begin/end events in the "Source"
+// category. Normalize the older shape so tree building and header extraction
+// see the same category.
+fn normalize_source_category(events: &mut [TraceEvent]) {
+    for event in events {
+        if event.name == SOURCE && event.cat.as_deref().is_none_or(str::is_empty) {
+            event.cat = Some(SOURCE.to_string());
+        }
+    }
+}
+
 // Fuse async events of type "b" (begin) and "e" (end) into a single "X" (complete) event
 fn fuse_async_trace_events(events: &mut Vec<TraceEvent>) {
     // Stack per (cat, id) of unclosed begin indices within the vector.
@@ -181,6 +193,9 @@ impl TraceTree {
             log::trace!("Empty trace events");
             return Self::default();
         }
+
+        // Clang 18 represents "Source" spans differently from clang 19+.
+        normalize_source_category(&mut trace_events);
 
         // Combine matching separate begin "b" and end "e" events into single duration "X" events
         fuse_async_trace_events(&mut trace_events);
@@ -640,6 +655,22 @@ mod tests {
         assert_eq!(tree.roots[""], vec![0]);
         assert_eq!(tree.roots["Source"], vec![1]);
         assert!(tree.nodes.iter().all(|n| n.parent.is_none()));
+    }
+
+    #[test]
+    fn uncategorized_source_events_are_grouped_under_source() {
+        // clang 18 emits complete "Source" events without a category.
+        let events = vec![
+            x_event("Frontend", 1, 1, 0, 500),
+            x_event_detail("Source", 1, 1, 100, 200, "/usr/include/cdefs.h"),
+            x_event_detail("Source", 1, 1, 110, 50, "/usr/include/features.h"),
+        ];
+        let tree = TraceTree::from(events);
+
+        assert_eq!(tree.roots[""], vec![0]);
+        assert_eq!(tree.roots[SOURCE], vec![1]);
+        assert_eq!(tree.nodes[1].children, vec![2]);
+        assert_eq!(tree.nodes[2].parent, Some(1));
     }
 
     #[test]
