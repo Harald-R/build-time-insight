@@ -165,6 +165,9 @@ impl Invocation {
                     skip_next = true;
                     continue;
                 }
+                // The analyzer re-runs the compiler for header analysis; tracing
+                // those runs would drop stray "-.json" files in the build dir.
+                _ if arg.starts_with("-ftime-trace") => continue,
                 _ if arg.starts_with("-o")
                     || arg.starts_with("-MF")
                     || arg.starts_with("-MT")
