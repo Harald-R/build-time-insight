@@ -657,7 +657,9 @@ pub fn analyze_build_dir(
 ) -> anyhow::Result<Analysis> {
     let paths = crate::build_traces::glob_trace_paths(build_dir, excludes);
     if paths.is_empty() {
-        anyhow::bail!("found no *.cpp.json traces in '{build_dir}'; compile with -ftime-trace");
+        anyhow::bail!(
+            "found no *.cpp.json or *.cppm.json traces in '{build_dir}'; compile with -ftime-trace"
+        );
     }
     let bar = if show_progress {
         let bar = indicatif::ProgressBar::new(paths.len() as u64);
@@ -688,7 +690,12 @@ pub fn analyze_build_dir(
             .into_par_iter()
             .filter_map(|path| {
                 let trace = crate::build_traces::parse_trace_file(&path)?;
-                let source_file = crate::build_traces::source_file_from_trace(&trace);
+                let mut source_file = crate::build_traces::source_file_from_trace(&trace);
+                if source_file.is_empty() {
+                    // Some module interface traces omit OptModule; the trace
+                    // file name is still <source>.json.
+                    source_file = path.to_str()?.strip_suffix(".json")?.to_string();
+                }
                 let trace_tree = TraceTree::from(trace.trace_events);
                 let file_trace = FileTrace {
                     trace_file: path.to_str()?.to_string(),
@@ -1553,17 +1560,29 @@ mod tests {
             ],
             "beginningOfTime": 1785441886055364
         }"#;
+        let module_without_opt_module = r#"{
+            "traceEvents": [
+                { "pid": 7, "tid": 7, "ts": 0, "ph": "X", "dur": 200, "name": "Frontend" },
+                { "pid": 7, "tid": 7, "ts": 0, "ph": "X", "dur": 250, "name": "Total ExecuteCompiler" }
+            ],
+            "beginningOfTime": 1785441886055364
+        }"#;
         write_trace_file(&dir, "main.cpp.json", valid);
+        write_trace_file(&dir, "module.cppm.json", module_without_opt_module);
         write_trace_file(&dir, "broken.cpp.json", "{ not valid json");
         write_trace_file(&dir, "ignored.json", valid);
 
         let result = analyze_build_dir(dir.to_str().unwrap(), 2, &[], false, false).unwrap();
+        let module_source = dir.join("module.cppm");
+        let module_id = result
+            .id_of(module_source.to_str().unwrap())
+            .expect("module trace falls back to its file name");
         std::fs::remove_dir_all(&dir).ok();
 
-        assert_eq!(result.result.unit_analysis.len(), 1);
+        assert_eq!(result.result.unit_analysis.len(), 2);
         let unit_id = result.id_of("src/main.cpp").unwrap();
-        let unit = &result.result.unit_analysis[&unit_id];
-        assert_eq!(unit.total_duration, 100);
+        assert_eq!(result.result.unit_analysis[&unit_id].total_duration, 100);
+        assert_eq!(result.result.unit_analysis[&module_id].total_duration, 250);
     }
 
     #[test]

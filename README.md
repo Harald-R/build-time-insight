@@ -43,8 +43,8 @@ deployed in CI environments for tracking the build performance over time.
 ## How it works
 
 1. `analyze` scans a build directory for Clang `-ftime-trace` files matching
-   `**/*.cpp.json`. Each trace is parsed into an event tree and aggregated per
-   translation unit, header, and template.
+   `**/*.cpp.json` and `**/*.cppm.json`. Each trace is parsed into an event tree
+   and aggregated per  translation unit, header, and template.
 2. The result is written as a gzip-compressed MessagePack report.
 3. `report` resolves the report and prints a summary or writes it as YAML.
 4. `compare` matches items by resolved path/name across two reports, computes
@@ -92,8 +92,9 @@ cmake --build build
 ```
 
 Clang writes one JSON trace per translation unit, typically as
-`<source>.cpp.json`, inside the build directory. The analyzer only reads
-`*.cpp.json` files.
+`<source>.cpp.json` for ordinary TUs or `<source>.cppm.json` for C++20 module
+interfaces and partitions. The analyzer reads `*.cpp.json` and `*.cppm.json`
+files.
 
 For meaningful comparisons, generate traces from clean builds. Incremental
 builds only rewrite traces for translation units that were recompiled.

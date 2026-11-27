@@ -35,29 +35,36 @@ pub fn glob_trace_paths(build_dir: &str, excludes: &[String]) -> Vec<PathBuf> {
                 .any(|ancestor| p.matches_path(ancestor))
         })
     };
-    let pattern = build_dir.to_owned() + "/**/*.cpp.json";
-    let paths: Vec<PathBuf> = match glob::glob(&pattern) {
-        Ok(paths) => paths
-            .filter_map(|entry| match entry {
-                Ok(path) => {
-                    if is_excluded(&path) {
-                        log::debug!("Excluding '{}'", path.display());
-                        None
-                    } else {
-                        Some(path)
+    // Ordinary translation units and module implementation units use
+    // `*.cpp.json`; C++20 module interfaces and partitions use `*.cppm.json`.
+    let patterns = [
+        build_dir.to_owned() + "/**/*.cpp.json",
+        build_dir.to_owned() + "/**/*.cppm.json",
+    ];
+    let mut paths = Vec::new();
+    for pattern in patterns {
+        match glob::glob(&pattern) {
+            Ok(entries) => {
+                for entry in entries {
+                    match entry {
+                        Ok(path) => {
+                            if is_excluded(&path) {
+                                log::debug!("Excluding '{}'", path.display());
+                            } else {
+                                paths.push(path);
+                            }
+                        }
+                        Err(e) => {
+                            log::warn!("Error while globbing '{}': {}", pattern, e);
+                        }
                     }
                 }
-                Err(e) => {
-                    log::warn!("Error while globbing '{}': {}", pattern, e);
-                    None
-                }
-            })
-            .collect(),
-        Err(e) => {
-            log::error!("Glob pattern error: {}", e);
-            return Vec::new();
+            }
+            Err(e) => {
+                log::error!("Glob pattern error for '{}': {}", pattern, e);
+            }
         }
-    };
+    }
     log::trace!("Found {} trace files", paths.len());
     paths
 }
@@ -844,23 +851,26 @@ mod tests {
     }
 
     #[test]
-    fn glob_trace_paths_finds_only_matching_cpp_json_files() {
+    fn glob_trace_paths_finds_cpp_and_cppm_json_files() {
         let dir = test_build_dir("glob_trace_paths");
         write_trace_file(&dir, "main.cpp.json", "{}");
         write_trace_file(&dir, "nested/second.cpp.json", "{}");
+        write_trace_file(&dir, "module.cppm.json", "{}");
+        write_trace_file(&dir, "CXXModules.json", "{}");
         write_trace_file(&dir, "ignored.json", "{}");
         write_trace_file(&dir, "notes.txt", "{}");
 
         let paths = glob_trace_paths(dir.to_str().unwrap(), &[]);
         std::fs::remove_dir_all(&dir).ok();
 
-        assert_eq!(paths.len(), 2);
+        assert_eq!(paths.len(), 3);
         let names: Vec<String> = paths
             .iter()
             .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
             .collect();
         assert!(names.contains(&"main.cpp.json".to_string()));
         assert!(names.contains(&"second.cpp.json".to_string()));
+        assert!(names.contains(&"module.cppm.json".to_string()));
     }
 
     #[test]
