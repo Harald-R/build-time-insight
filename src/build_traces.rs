@@ -35,38 +35,78 @@ pub fn glob_trace_paths(build_dir: &str, excludes: &[String]) -> Vec<PathBuf> {
                 .any(|ancestor| p.matches_path(ancestor))
         })
     };
-    // Ordinary translation units and module implementation units use
-    // `*.cpp.json`; C++20 module interfaces and partitions use `*.cppm.json`.
-    let patterns = [
-        build_dir.to_owned() + "/**/*.cpp.json",
-        build_dir.to_owned() + "/**/*.cppm.json",
-    ];
+    let pattern = build_dir.to_owned() + "/**/*.json";
     let mut paths = Vec::new();
-    for pattern in patterns {
-        match glob::glob(&pattern) {
-            Ok(entries) => {
-                for entry in entries {
-                    match entry {
-                        Ok(path) => {
-                            if is_excluded(&path) {
-                                log::debug!("Excluding '{}'", path.display());
-                            } else {
-                                paths.push(path);
-                            }
+    match glob::glob(&pattern) {
+        Ok(entries) => {
+            for entry in entries {
+                match entry {
+                    Ok(path) => {
+                        if is_excluded(&path) {
+                            log::debug!("Excluding '{}'", path.display());
+                            continue;
                         }
-                        Err(e) => {
-                            log::warn!("Error while globbing '{}': {}", pattern, e);
+                        // CMake emits metadata JSON next to the traces. Accept
+                        // the conventional names without opening them, and
+                        // sniff other files for a trace payload (clang <= 21
+                        // names module-interface phase traces after the PCM).
+                        if is_cmake_probe_trace(build_dir, &path) {
+                            log::debug!("Ignoring CMake probe trace '{}'", path.display());
+                            continue;
                         }
+                        let known_trace_name = path
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .is_some_and(|name| {
+                                name.ends_with(".cpp.json") || name.ends_with(".cppm.json")
+                            });
+                        if known_trace_name || is_trace_json(&path) {
+                            paths.push(path);
+                        }
+                    }
+                    Err(e) => {
+                        log::warn!("Error while globbing '{}': {}", pattern, e);
                     }
                 }
             }
-            Err(e) => {
-                log::error!("Glob pattern error for '{}': {}", pattern, e);
-            }
+        }
+        Err(e) => {
+            log::error!("Glob pattern error for '{}': {}", pattern, e);
         }
     }
     log::trace!("Found {} trace files", paths.len());
     paths
+}
+
+/// CMake's compiler/ABI probes can emit `-ftime-trace` files when the flags
+/// are set globally. They live under `CMakeFiles/<cmake-version>/` or
+/// `CMakeFiles/CMakeScratch/` and are not project translation units.
+fn is_cmake_probe_trace(build_dir: &str, path: &Path) -> bool {
+    let rel = path.strip_prefix(build_dir).unwrap_or(path);
+    let mut components = rel.components();
+    let Some(first) = components.next() else {
+        return false;
+    };
+    if first.as_os_str() != "CMakeFiles" {
+        return false;
+    }
+    let Some(second) = components.next() else {
+        return false;
+    };
+    let name = second.as_os_str().to_string_lossy();
+    name == "CMakeScratch" || name.starts_with(|c: char| c.is_ascii_digit())
+}
+
+/// Returns true when the file starts with a clang trace payload.
+fn is_trace_json(path: &Path) -> bool {
+    let Ok(mut file) = File::open(path) else {
+        return false;
+    };
+    let mut probe = [0u8; 512];
+    let Ok(read) = file.read(&mut probe) else {
+        return false;
+    };
+    String::from_utf8_lossy(&probe[..read]).contains("\"traceEvents\"")
 }
 
 /// Parse a trace file into its raw events, logging and skipping broken files
@@ -97,6 +137,19 @@ pub fn source_file_from_trace(trace: &TraceEventFile) -> String {
         .and_then(|event| event.args.as_ref().and_then(|args| args.detail.as_deref()))
         .unwrap_or("")
         .to_string()
+}
+
+/// Extract the PCM/BMI path associated with a module-unit trace. Clang <= 21
+/// emits separate phase traces named after this file, while `OptModule` in the
+/// module-unit trace points at the PCM rather than the `.cppm` source.
+pub fn pcm_file_from_trace(trace: &TraceEventFile) -> Option<String> {
+    trace
+        .trace_events
+        .iter()
+        .filter(|event| event.name == OPT_MODULE || event.name == "WriteAST")
+        .filter_map(|event| event.args.as_ref().and_then(|args| args.detail.as_deref()))
+        .find(|detail| detail.ends_with(".pcm"))
+        .map(str::to_string)
 }
 
 type NodeId = usize;
@@ -856,6 +909,12 @@ mod tests {
         write_trace_file(&dir, "main.cpp.json", "{}");
         write_trace_file(&dir, "nested/second.cpp.json", "{}");
         write_trace_file(&dir, "module.cppm.json", "{}");
+        write_trace_file(&dir, "core.json", r#"{ "traceEvents": [] }"#);
+        write_trace_file(
+            &dir,
+            "CMakeFiles/4.4.4/CompilerIdCXX/a-CMakeCXXCompilerId.json",
+            r#"{ "traceEvents": [] }"#,
+        );
         write_trace_file(&dir, "CXXModules.json", "{}");
         write_trace_file(&dir, "ignored.json", "{}");
         write_trace_file(&dir, "notes.txt", "{}");
@@ -863,7 +922,7 @@ mod tests {
         let paths = glob_trace_paths(dir.to_str().unwrap(), &[]);
         std::fs::remove_dir_all(&dir).ok();
 
-        assert_eq!(paths.len(), 3);
+        assert_eq!(paths.len(), 4);
         let names: Vec<String> = paths
             .iter()
             .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
@@ -871,6 +930,7 @@ mod tests {
         assert!(names.contains(&"main.cpp.json".to_string()));
         assert!(names.contains(&"second.cpp.json".to_string()));
         assert!(names.contains(&"module.cppm.json".to_string()));
+        assert!(names.contains(&"core.json".to_string()));
     }
 
     #[test]

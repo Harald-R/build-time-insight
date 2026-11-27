@@ -20,7 +20,8 @@ Examples:
     ./sanitize-build-dirs.py tests/data/cpp-project/build-clang-18
 
 It keeps:
-  - *.cpp.json and *.cppm.json traces
+  - all Clang trace JSON, including *.cpp.json, *.cppm.json, and extra PCM
+    phase traces emitted by clang <= 21
   - compile_commands.json
   - build.ninja for target timings
   - a minimal CMakeCache.txt and CMakeCXXCompiler.cmake for build info
@@ -219,10 +220,17 @@ def sanitize_cmake_compiler_file(path: Path) -> None:
     write_text(path, "\n".join(kept) + "\n")
 
 
-def is_kept(rel: Path) -> bool:
+def is_trace_json(path: Path) -> bool:
+    try:
+        return b'"traceEvents"' in path.read_bytes()[:512]
+    except OSError:
+        return False
+
+
+def is_kept(path: Path, rel: Path) -> bool:
     if rel.as_posix() in {"build.ninja", "compile_commands.json", "CMakeCache.txt"}:
         return True
-    if str(rel).endswith((".cpp.json", ".cppm.json")):
+    if path.suffix == ".json" and is_trace_json(path):
         return True
     if re.fullmatch(r"CMakeFiles/[^/]+/CMakeCXXCompiler\.cmake", rel.as_posix()):
         return True
@@ -248,11 +256,10 @@ def sanitize_build_dir(build_dir: Path, root: Path) -> None:
     # Keep only analyzer inputs: traces, compile commands, build info and the
     # Ninja target graph.
     for path in sorted(build_dir.rglob("*"), reverse=True):
-        if path.is_file() and not is_kept(path.relative_to(build_dir)):
+        if path.is_file() and not is_kept(path, path.relative_to(build_dir)):
             path.unlink()
 
-    trace_paths = list(build_dir.rglob("*.cpp.json"))
-    trace_paths.extend(build_dir.rglob("*.cppm.json"))
+    trace_paths = [path for path in build_dir.rglob("*.json") if is_trace_json(path)]
     for path in trace_paths:
         sanitize_trace(path, root)
 

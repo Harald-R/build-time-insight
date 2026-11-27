@@ -6,7 +6,9 @@ use std::path::Path;
 use std::sync::{LazyLock, Mutex, MutexGuard};
 
 use itertools::Itertools;
-use rayon::iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
+use rayon::iter::{
+    IntoParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator, ParallelIterator,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::build_traces::{FileTrace, LoopControl, TraceNode, TraceTree};
@@ -113,6 +115,41 @@ impl UnitAnalysis {
         self.class_template_instantiations
             .iter()
             .max_by(|a, b| a.1.total_duration.cmp(&b.1.total_duration))
+    }
+
+    /// Merges another analysis of the same translation unit into this one.
+    /// Clang <= 21 splits module interfaces into a PCM-producing frontend job
+    /// and a PCM-to-object backend job, each with its own trace.
+    fn merge(&mut self, other: Self) {
+        self.total_duration += other.total_duration;
+        self.frontend_duration += other.frontend_duration;
+        self.backend_duration += other.backend_duration;
+        self.template_instantiation_duration += other.template_instantiation_duration;
+
+        for (header, duration) in other.header_parse_duration {
+            *self.header_parse_duration.entry(header).or_default() += duration;
+        }
+        for (header, chains) in other.header_inclusion_paths {
+            let target = self.header_inclusion_paths.entry(header).or_default();
+            for (chain, count) in chains {
+                *target.entry(chain).or_default() += count;
+            }
+        }
+        for (header, usage) in other.header_usage {
+            self.header_usage.entry(header).or_insert(usage);
+        }
+        for (name, inst) in other.function_template_instantiations {
+            self.function_template_instantiations
+                .entry(name)
+                .and_modify(|existing| existing.merge(&inst))
+                .or_insert(inst);
+        }
+        for (name, inst) in other.class_template_instantiations {
+            self.class_template_instantiations
+                .entry(name)
+                .and_modify(|existing| existing.merge(&inst))
+                .or_insert(inst);
+        }
     }
 }
 
@@ -640,6 +677,19 @@ pub fn analyze(traces: Vec<FileTrace>) -> Analysis {
     finalize(&interner, None, AnalysisResult::from(unit_analysis))
 }
 
+/// Intermediate result for one trace file. A module unit can have more than one
+/// trace: clang <= 21 writes a frontend/PCM trace and a separate PCM-to-object
+/// backend trace. `source` is a temporary PCM key for the latter until the
+/// matching module source has been resolved.
+struct TraceResult {
+    source: String,
+    fallback_source: String,
+    pcm: Option<String>,
+    is_primary: bool,
+    unit_id: StringId,
+    unit: UnitAnalysis,
+}
+
 /// Analyze the build directory using up to `jobs` worker threads.
 ///
 /// Each worker thread processes one trace file completely (parse -> tree ->
@@ -685,45 +735,138 @@ pub fn analyze_build_dir(
     let root_ref = root.as_deref();
     let compile_commands_ref = &compile_commands;
     let bar_ref = &bar;
-    let unit_analysis: HashMap<StringId, UnitAnalysis> = build_pool(jobs).install(move || {
+    let trace_results: Vec<TraceResult> = build_pool(jobs).install(move || {
         paths
             .into_par_iter()
             .filter_map(|path| {
                 let trace = crate::build_traces::parse_trace_file(&path)?;
-                let mut source_file = crate::build_traces::source_file_from_trace(&trace);
-                if source_file.is_empty() {
-                    // Some module interface traces omit OptModule; the trace
-                    // file name is still <source>.json.
-                    source_file = path.to_str()?.strip_suffix(".json")?.to_string();
-                }
+                let trace_name = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("");
+                let is_primary =
+                    trace_name.ends_with(".cpp.json") || trace_name.ends_with(".cppm.json");
+                let detail = crate::build_traces::source_file_from_trace(&trace);
+                let pcm = crate::build_traces::pcm_file_from_trace(&trace);
+                let fallback_source = path.to_str()?.strip_suffix(".json")?.to_string();
+
+                let source = if is_primary && !detail.is_empty() && !detail.ends_with(".pcm") {
+                    detail
+                } else if let Some(pcm) = &pcm {
+                    if is_primary {
+                        // Clang <= 21 points OptModule at the PCM for module
+                        // interface units; the trace file still names the source.
+                        fallback_source.clone()
+                    } else {
+                        // Separate PCM-generation phase trace; resolve it to the
+                        // module source after all traces have been seen.
+                        format!("\0pcm:{pcm}")
+                    }
+                } else if !detail.is_empty() {
+                    detail
+                } else if is_primary {
+                    fallback_source.clone()
+                } else {
+                    let stem = Path::new(&fallback_source)
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or_default();
+                    format!("\0stem:{stem}")
+                };
+
                 let trace_tree = TraceTree::from(trace.trace_events);
                 let file_trace = FileTrace {
                     trace_file: path.to_str()?.to_string(),
-                    source_file: Some(source_file),
+                    source_file: Some(source.clone()),
                     trace_tree,
                 };
-                let (unit_id, mut unit) = analyze_unit(&file_trace, shared);
+                let (unit_id, unit) = analyze_unit(&file_trace, shared);
                 if let Some(bar) = bar_ref {
                     bar.inc(1);
                 }
-                if header_usage {
-                    let source = lock(shared).resolve(unit_id).to_string();
-                    for (header, usage) in crate::header_usage::analyze_unit_header_usage(
-                        &source,
-                        root_ref,
-                        compile_commands_ref,
-                    ) {
-                        let header_id = lock(shared).intern(&header);
-                        unit.header_usage.insert(header_id, usage);
-                    }
-                }
-                Some((unit_id, unit))
+                Some(TraceResult {
+                    source,
+                    fallback_source,
+                    pcm,
+                    is_primary,
+                    unit_id,
+                    unit,
+                })
             })
             .collect()
     });
     if let Some(bar) = &bar {
         bar.finish_and_clear();
     }
+
+    // Map PCM outputs to their module source, then merge phase traces belonging
+    // to the same translation unit.
+    let mut pcm_sources: HashMap<String, String> = HashMap::new();
+    let mut module_by_stem: HashMap<String, String> = HashMap::new();
+    for result in &trace_results {
+        if !result.is_primary {
+            continue;
+        }
+        if let Some(pcm) = &result.pcm {
+            pcm_sources.insert(pcm.clone(), result.source.clone());
+        }
+        if result.source.ends_with(".cppm")
+            && let Some(stem) = Path::new(&result.source).file_stem()
+        {
+            module_by_stem.insert(stem.to_string_lossy().into_owned(), result.source.clone());
+        }
+    }
+
+    let mut unit_analysis: HashMap<StringId, UnitAnalysis> = HashMap::new();
+    for result in trace_results {
+        let trace_stem = Path::new(&result.fallback_source)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        let source = if let Some(pcm) = result.source.strip_prefix("\0pcm:") {
+            pcm_sources
+                .get(pcm)
+                .or_else(|| module_by_stem.get(trace_stem))
+                .cloned()
+                .unwrap_or_else(|| result.fallback_source.clone())
+        } else if let Some(stem) = result.source.strip_prefix("\0stem:") {
+            module_by_stem
+                .get(stem)
+                .cloned()
+                .unwrap_or_else(|| result.fallback_source.clone())
+        } else {
+            result.source.clone()
+        };
+        let unit_id = if source == result.source {
+            result.unit_id
+        } else {
+            intern_path(shared, &source)
+        };
+        if let Some(unit) = unit_analysis.get_mut(&unit_id) {
+            unit.merge(result.unit);
+        } else {
+            unit_analysis.insert(unit_id, result.unit);
+        }
+    }
+
+    if header_usage {
+        let mut units: Vec<(StringId, UnitAnalysis)> = unit_analysis.into_iter().collect();
+        build_pool(jobs).install(|| {
+            units.par_iter_mut().for_each(|(unit_id, unit)| {
+                let source = lock(shared).resolve(*unit_id).to_string();
+                for (header, usage) in crate::header_usage::analyze_unit_header_usage(
+                    &source,
+                    root_ref,
+                    compile_commands_ref,
+                ) {
+                    let header_id = lock(shared).intern(&header);
+                    unit.header_usage.insert(header_id, usage);
+                }
+            });
+        });
+        unit_analysis = units.into_iter().collect();
+    }
+
     let mut analysis = finalize(&interner, root, AnalysisResult::from(unit_analysis));
 
     // Build the CMake target graph. The durations map holds each unit's total
@@ -1570,7 +1713,7 @@ mod tests {
         write_trace_file(&dir, "main.cpp.json", valid);
         write_trace_file(&dir, "module.cppm.json", module_without_opt_module);
         write_trace_file(&dir, "broken.cpp.json", "{ not valid json");
-        write_trace_file(&dir, "ignored.json", valid);
+        write_trace_file(&dir, "ignored.json", "{}");
 
         let result = analyze_build_dir(dir.to_str().unwrap(), 2, &[], false, false).unwrap();
         let module_source = dir.join("module.cppm");
@@ -1583,6 +1726,38 @@ mod tests {
         let unit_id = result.id_of("src/main.cpp").unwrap();
         assert_eq!(result.result.unit_analysis[&unit_id].total_duration, 100);
         assert_eq!(result.result.unit_analysis[&module_id].total_duration, 250);
+    }
+
+    #[test]
+    fn analyze_build_dir_merges_module_phase_traces() {
+        let dir = test_build_dir("analyze_module_phases");
+        // Clang <= 21: a PCM-producing trace and a PCM-to-object trace.
+        let module_trace = r#"{
+            "traceEvents": [
+                { "pid": 1, "tid": 1, "ts": 0, "ph": "X", "dur": 1, "name": "OptModule", "args": { "detail": "CMakeFiles/core.dir/core.pcm" } },
+                { "pid": 1, "tid": 1, "ts": 0, "ph": "X", "dur": 5, "name": "Total ExecuteCompiler" }
+            ],
+            "beginningOfTime": 0
+        }"#;
+        let pcm_trace = r#"{
+            "traceEvents": [
+                { "pid": 1, "tid": 1, "ts": 0, "ph": "X", "dur": 50, "name": "WriteAST", "args": { "detail": "CMakeFiles/core.dir/core.pcm" } },
+                { "pid": 1, "tid": 1, "ts": 0, "ph": "X", "dur": 100, "name": "Total ExecuteCompiler" }
+            ],
+            "beginningOfTime": 0
+        }"#;
+        write_trace_file(&dir, "core.cppm.json", module_trace);
+        write_trace_file(&dir, "core.json", pcm_trace);
+
+        let result = analyze_build_dir(dir.to_str().unwrap(), 2, &[], false, false).unwrap();
+        let source = dir.join("core.cppm");
+        let unit_id = result
+            .id_of(source.to_str().unwrap())
+            .expect("module phase traces are merged under the source name");
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert_eq!(result.result.unit_analysis.len(), 1);
+        assert_eq!(result.result.unit_analysis[&unit_id].total_duration, 105);
     }
 
     #[test]

@@ -69,6 +69,8 @@ Each build directory contains:
 
 - `CMakeFiles/**/*.cpp.json` — ordinary and implementation-unit traces
 - `CMakeFiles/**/*.cppm.json` — module interface and partition traces
+- with clang 18–21, additional `CMakeFiles/<target>.dir/<module>.json` traces
+  for the PCM-producing phase
 - `compile_commands.json`
 - `build.ninja`, `CMakeCache.txt`, and generated module metadata
 
