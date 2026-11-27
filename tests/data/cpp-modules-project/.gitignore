@@ -1,0 +1,10 @@
+# Generated build outputs. Traces, compile_commands.json, and CMake metadata
+# may be committed separately after sanitizing local paths.
+*.o
+*.a
+*.so
+*.bin
+*.pcm
+a.out
+build-*/modules_app
+/test-build-*

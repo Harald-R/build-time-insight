@@ -1,16 +1,44 @@
 #!/usr/bin/env python3
 """Strip machine-local paths from fixture build directories.
 
-The fixture commits build directories as test input.  Raw CMake/Ninja output
-contains absolute paths, Nix store hashes, PIDs, and other host-specific data.
-This script keeps the files the analyzer needs and rewrites the rest so the
-directories are small, portable, and safe to commit.
+The fixture projects commit build directories as test input. Raw CMake/Ninja
+output contains absolute paths, Nix store hashes, PIDs, and other host-specific
+data. This script keeps the files the analyzer needs and rewrites the rest so
+the directories are small, portable, safe to commit, and still analyzable.
 
 Usage:
-    ./sanitize-build-dirs.py [build-dir ...]
+    ./sanitize-build-dirs.py [path ...]
 
-Without arguments, all build-clang-* directories next to this script are
-sanitized in place.  Run it after build-traces.sh.
+Each path is searched non-recursively for build-clang-* directories. A path
+that is itself a build-clang-* directory is sanitized directly. Without
+arguments, the current working directory is searched. Run it after a fixture's
+build-traces.sh.
+
+Examples:
+    ./sanitize-build-dirs.py tests/data/cpp-project
+    ./sanitize-build-dirs.py tests/data/cpp-project tests/data/cpp-modules-project
+    ./sanitize-build-dirs.py tests/data/cpp-project/build-clang-18
+
+It keeps:
+  - *.cpp.json and *.cppm.json traces
+  - compile_commands.json
+  - build.ninja for target timings
+  - a minimal CMakeCache.txt and CMakeCXXCompiler.cmake for build info
+  - CMake File API replies, when present
+
+It removes object files, archives, binaries, .ninja_log, .ninja_deps, CMake
+compiler-detection output, configuration logs, module .pcm files, and .modmap
+response files.
+
+It rewrites:
+  - project paths to be relative to the repository or build directory
+  - Nix store hashes to 000...000 and /run/current-system to a neutral prefix
+  - home-directory names to "user"
+  - trace PIDs/thread IDs to small stable IDs and beginningOfTime to 0
+
+Trace analysis and target mapping work after sanitization. For the C++20
+modules fixture, removing .pcm/.modmap means --header-usage replay of module
+units requires rebuilding their BMIs first.
 """
 
 from __future__ import annotations
@@ -194,7 +222,7 @@ def sanitize_cmake_compiler_file(path: Path) -> None:
 def is_kept(rel: Path) -> bool:
     if rel.as_posix() in {"build.ninja", "compile_commands.json", "CMakeCache.txt"}:
         return True
-    if str(rel).endswith(".cpp.json"):
+    if str(rel).endswith((".cpp.json", ".cppm.json")):
         return True
     if re.fullmatch(r"CMakeFiles/[^/]+/CMakeCXXCompiler\.cmake", rel.as_posix()):
         return True
@@ -223,7 +251,9 @@ def sanitize_build_dir(build_dir: Path, root: Path) -> None:
         if path.is_file() and not is_kept(path.relative_to(build_dir)):
             path.unlink()
 
-    for path in build_dir.rglob("*.cpp.json"):
+    trace_paths = list(build_dir.rglob("*.cpp.json"))
+    trace_paths.extend(build_dir.rglob("*.cppm.json"))
+    for path in trace_paths:
         sanitize_trace(path, root)
 
     compile_commands = build_dir / "compile_commands.json"
@@ -250,15 +280,23 @@ def main(argv: list[str]) -> int:
         return 0
 
     root = repo_root()
-    if argv:
-        build_dirs = [Path(arg) for arg in argv]
-    else:
-        build_dirs = sorted(SCRIPT_DIR.glob("build-clang-*"))
+    paths = [Path(arg) for arg in argv] if argv else [Path.cwd()]
 
-    for build_dir in build_dirs:
-        if not build_dir.is_dir():
-            print(f"warning: not a directory: {build_dir}", file=sys.stderr)
+    build_dirs: list[Path] = []
+    for path in paths:
+        if not path.is_dir():
+            print(f"warning: not a directory: {path}", file=sys.stderr)
             continue
+        if path.name.startswith("build-clang-"):
+            build_dirs.append(path)
+            continue
+        found = sorted(path.glob("build-clang-*"))
+        if not found:
+            print(f"warning: no build-clang-* directories in {path}", file=sys.stderr)
+        build_dirs.extend(found)
+
+    # Deduplicate when both a parent and one of its build dirs were given.
+    for build_dir in sorted({path.resolve() for path in build_dirs}):
         print(f"sanitizing {build_dir}")
         sanitize_build_dir(build_dir, root)
     return 0
