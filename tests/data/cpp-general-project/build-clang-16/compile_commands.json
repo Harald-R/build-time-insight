@@ -1,0 +1,50 @@
+[
+  {
+    "directory": "tests/data/cpp-general-project/build-clang-16",
+    "command": "clang++ -I../include -std=c++17 -ftime-trace -o CMakeFiles/geometry_lib.dir/src/geometry.cpp.o -c ../src/geometry.cpp",
+    "file": "tests/data/cpp-general-project/src/geometry.cpp",
+    "output": "CMakeFiles/geometry_lib.dir/src/geometry.cpp.o"
+  },
+  {
+    "directory": "tests/data/cpp-general-project/build-clang-16",
+    "command": "clang++ -I../include -std=c++17 -ftime-trace -o CMakeFiles/geometry_lib.dir/src/shapes.cpp.o -c ../src/shapes.cpp",
+    "file": "tests/data/cpp-general-project/src/shapes.cpp",
+    "output": "CMakeFiles/geometry_lib.dir/src/shapes.cpp.o"
+  },
+  {
+    "directory": "tests/data/cpp-general-project/build-clang-16",
+    "command": "clang++ -I../include -std=c++17 -ftime-trace -o CMakeFiles/shapely.dir/src/main.cpp.o -c ../src/main.cpp",
+    "file": "tests/data/cpp-general-project/src/main.cpp",
+    "output": "CMakeFiles/shapely.dir/src/main.cpp.o"
+  },
+  {
+    "directory": "tests/data/cpp-general-project/build-clang-16",
+    "command": "clang++ -I../include -std=c++17 -ftime-trace -o CMakeFiles/edge_cases.dir/src/edge/edge_unused.cpp.o -c ../src/edge/edge_unused.cpp",
+    "file": "tests/data/cpp-general-project/src/edge/edge_unused.cpp",
+    "output": "CMakeFiles/edge_cases.dir/src/edge/edge_unused.cpp.o"
+  },
+  {
+    "directory": "tests/data/cpp-general-project/build-clang-16",
+    "command": "clang++ -I../include -std=c++17 -ftime-trace -o CMakeFiles/edge_cases.dir/src/edge/edge_fwd.cpp.o -c ../src/edge/edge_fwd.cpp",
+    "file": "tests/data/cpp-general-project/src/edge/edge_fwd.cpp",
+    "output": "CMakeFiles/edge_cases.dir/src/edge/edge_fwd.cpp.o"
+  },
+  {
+    "directory": "tests/data/cpp-general-project/build-clang-16",
+    "command": "clang++ -I../include -std=c++17 -ftime-trace -o CMakeFiles/edge_cases.dir/src/edge/edge_needs.cpp.o -c ../src/edge/edge_needs.cpp",
+    "file": "tests/data/cpp-general-project/src/edge/edge_needs.cpp",
+    "output": "CMakeFiles/edge_cases.dir/src/edge/edge_needs.cpp.o"
+  },
+  {
+    "directory": "tests/data/cpp-general-project/build-clang-16",
+    "command": "clang++ -I../include -std=c++17 -ftime-trace -o CMakeFiles/edge_cases.dir/src/edge/edge_diamond.cpp.o -c ../src/edge/edge_diamond.cpp",
+    "file": "tests/data/cpp-general-project/src/edge/edge_diamond.cpp",
+    "output": "CMakeFiles/edge_cases.dir/src/edge/edge_diamond.cpp.o"
+  },
+  {
+    "directory": "tests/data/cpp-general-project/build-clang-16",
+    "command": "clang++ -I../include -std=c++17 -ftime-trace -o CMakeFiles/edge_cases.dir/src/edge/edge_diamond2.cpp.o -c ../src/edge/edge_diamond2.cpp",
+    "file": "tests/data/cpp-general-project/src/edge/edge_diamond2.cpp",
+    "output": "CMakeFiles/edge_cases.dir/src/edge/edge_diamond2.cpp.o"
+  }
+]

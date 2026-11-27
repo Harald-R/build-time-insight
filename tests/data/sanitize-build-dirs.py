@@ -15,9 +15,9 @@ arguments, the current working directory is searched. Run it after a fixture's
 build-traces.sh.
 
 Examples:
-    ./sanitize-build-dirs.py tests/data/cpp-project
-    ./sanitize-build-dirs.py tests/data/cpp-project tests/data/cpp-modules-project
-    ./sanitize-build-dirs.py tests/data/cpp-project/build-clang-18
+    ./sanitize-build-dirs.py tests/data/cpp-general-project
+    ./sanitize-build-dirs.py tests/data/cpp-general-project tests/data/cpp-modules-project
+    ./sanitize-build-dirs.py tests/data/cpp-general-project/build-clang-18
 
 It keeps:
   - all Clang trace JSON, including *.cpp.json, *.cppm.json, and extra PCM

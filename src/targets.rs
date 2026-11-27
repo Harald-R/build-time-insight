@@ -524,11 +524,11 @@ mod tests {
     fn resolves_relative_compile_command_sources() {
         assert_eq!(
             compile_command_source(
-                "tests/data/cpp-project/build-clang-18",
-                "tests/data/cpp-project/src/a.cpp",
+                "tests/data/cpp-general-project/build-clang-18",
+                "tests/data/cpp-general-project/src/a.cpp",
                 Some("/repo"),
             ),
-            "/repo/tests/data/cpp-project/src/a.cpp"
+            "/repo/tests/data/cpp-general-project/src/a.cpp"
         );
         assert_eq!(
             compile_command_source("/build", "src/a.cpp", None),

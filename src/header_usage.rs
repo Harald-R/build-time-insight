@@ -1197,30 +1197,33 @@ mod tests {
     fn invocation_resolves_relative_compile_commands() {
         let compile_commands = CompileCommands {
             entries: vec![CompileCommand {
-                directory: "tests/data/cpp-project/build-clang-18".to_string(),
-                file: "tests/data/cpp-project/src/a.cpp".to_string(),
+                directory: "tests/data/cpp-general-project/build-clang-18".to_string(),
+                file: "tests/data/cpp-general-project/src/a.cpp".to_string(),
                 arguments: Some(vec![
                     "clang++".to_string(),
                     "-I../include".to_string(),
                     "-c".to_string(),
-                    "tests/data/cpp-project/src/a.cpp".to_string(),
+                    "tests/data/cpp-general-project/src/a.cpp".to_string(),
                 ]),
                 command: None,
             }],
         };
         let invocation = Invocation::for_source(
-            "tests/data/cpp-project/src/a.cpp",
+            "tests/data/cpp-general-project/src/a.cpp",
             Some("/repo"),
             &Some(compile_commands),
         );
         assert_eq!(
             invocation.directory,
-            "/repo/tests/data/cpp-project/build-clang-18"
+            "/repo/tests/data/cpp-general-project/build-clang-18"
         );
-        assert_eq!(invocation.source, "/repo/tests/data/cpp-project/src/a.cpp");
+        assert_eq!(
+            invocation.source,
+            "/repo/tests/data/cpp-general-project/src/a.cpp"
+        );
         assert_eq!(
             invocation.flags,
-            vec!["-I/repo/tests/data/cpp-project/include"]
+            vec!["-I/repo/tests/data/cpp-general-project/include"]
         );
     }
 
