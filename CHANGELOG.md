@@ -1,5 +1,26 @@
 # Changelog
 
+## v0.2.0
+
+### Added
+
+- C++20 module support for `-ftime-trace` analysis.
+
+### Changed
+
+- Build information parsing now supports relative source paths.
+- Reduced default logging verbosity.
+- Clarified which requirements apply to building, running, and optional
+  analysis modes.
+
+### Fixed
+
+- Header parse durations for Clang <= 18, whose `Source` events have no
+  category.
+- Clang 9/10 traces that omit `beginningOfTime` are no longer rejected.
+- `--header-usage` no longer leaves stray `-.json` or `.json` trace files in
+  the analyzed build directories.
+
 ## v0.1.0
 
 Initial release.
