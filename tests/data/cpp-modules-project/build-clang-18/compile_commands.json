@@ -1,0 +1,38 @@
+[
+  {
+    "directory": "tests/data/cpp-modules-project/build-clang-18",
+    "command": "clang++ -I../include -std=c++20 -ftime-trace @CMakeFiles/core.dir/src/core.cpp.o.modmap -o CMakeFiles/core.dir/src/core.cpp.o -c ../src/core.cpp",
+    "file": "tests/data/cpp-modules-project/src/core.cpp",
+    "output": "CMakeFiles/core.dir/src/core.cpp.o"
+  },
+  {
+    "directory": "tests/data/cpp-modules-project/build-clang-18",
+    "command": "clang++ -I../include -std=c++20 -ftime-trace @CMakeFiles/core.dir/src/core.cppm.o.modmap -o CMakeFiles/core.dir/src/core.cppm.o -c ../src/core.cppm",
+    "file": "tests/data/cpp-modules-project/src/core.cppm",
+    "output": "CMakeFiles/core.dir/src/core.cppm.o"
+  },
+  {
+    "directory": "tests/data/cpp-modules-project/build-clang-18",
+    "command": "clang++ -I../include -std=c++20 -ftime-trace @CMakeFiles/core.dir/src/core-shapes.cppm.o.modmap -o CMakeFiles/core.dir/src/core-shapes.cppm.o -c ../src/core-shapes.cppm",
+    "file": "tests/data/cpp-modules-project/src/core-shapes.cppm",
+    "output": "CMakeFiles/core.dir/src/core-shapes.cppm.o"
+  },
+  {
+    "directory": "tests/data/cpp-modules-project/build-clang-18",
+    "command": "clang++ -I../include -std=c++20 -ftime-trace @CMakeFiles/core.dir/src/core-detail.cppm.o.modmap -o CMakeFiles/core.dir/src/core-detail.cppm.o -c ../src/core-detail.cppm",
+    "file": "tests/data/cpp-modules-project/src/core-detail.cppm",
+    "output": "CMakeFiles/core.dir/src/core-detail.cppm.o"
+  },
+  {
+    "directory": "tests/data/cpp-modules-project/build-clang-18",
+    "command": "clang++ -I../include -std=c++20 -ftime-trace @CMakeFiles/modules_app.dir/src/main.cpp.o.modmap -o CMakeFiles/modules_app.dir/src/main.cpp.o -c ../src/main.cpp",
+    "file": "tests/data/cpp-modules-project/src/main.cpp",
+    "output": "CMakeFiles/modules_app.dir/src/main.cpp.o"
+  },
+  {
+    "directory": "tests/data/cpp-modules-project/build-clang-18",
+    "command": "clang++ -I../include -std=c++20 -ftime-trace @CMakeFiles/modules_app.dir/src/consumer.cpp.o.modmap -o CMakeFiles/modules_app.dir/src/consumer.cpp.o -c ../src/consumer.cpp",
+    "file": "tests/data/cpp-modules-project/src/consumer.cpp",
+    "output": "CMakeFiles/modules_app.dir/src/consumer.cpp.o"
+  }
+]
