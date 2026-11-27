@@ -8,6 +8,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use rayon::prelude::*;
+
 use build_time_insight::analyzer::{self, AnalysisResult, TemplateInstantiation, UnitAnalysis};
 use build_time_insight::build_info::BuildInfo;
 use build_time_insight::build_traces;
@@ -43,6 +45,34 @@ fn fixture_build_dirs() -> Vec<PathBuf> {
 
 fn contains_traces(dir: &Path) -> bool {
     !build_traces::glob_trace_paths(dir.to_str().unwrap_or(""), &[]).is_empty()
+}
+
+/// Checks that a build directory's recorded compiler matches its name, e.g.
+/// `build-clang-18` must report clang 18.x.
+fn assert_build_info_matches_dir(dir: &Path, info: &BuildInfo) {
+    let expected_major = dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .and_then(|name| name.strip_prefix("build-clang-"))
+        .unwrap_or_else(|| panic!("unexpected fixture build dir name: {}", dir.display()));
+
+    let toolchain = info
+        .toolchain
+        .as_ref()
+        .unwrap_or_else(|| panic!("no toolchain info in {}", dir.display()));
+    let compiler = toolchain
+        .cxx_compiler
+        .as_ref()
+        .unwrap_or_else(|| panic!("no C++ compiler info in {}", dir.display()));
+
+    assert_eq!(compiler.name, "Clang", "{}", dir.display());
+    assert!(
+        compiler.version == expected_major
+            || compiler.version.starts_with(&format!("{expected_major}.")),
+        "{} reports clang {}, expected major {expected_major}",
+        dir.display(),
+        compiler.version
+    );
 }
 
 fn resolve(strings: &[String], id: StringId) -> &str {
@@ -355,6 +385,41 @@ fn assert_header_usage(strings: &[String], result: &AnalysisResult) {
     }
 }
 
+/// Every fixture build must expose the same CMake target graph.
+fn assert_target_graph(dir: &Path, result: &AnalysisResult) {
+    let graph = result
+        .targets
+        .as_ref()
+        .unwrap_or_else(|| panic!("no CMake target data in {}", dir.display()));
+
+    let names: Vec<&str> = graph.targets.iter().map(|t| t.name.as_str()).collect();
+    assert!(names.contains(&"geometry_lib"), "targets: {names:?}");
+    assert!(names.contains(&"shapely"), "targets: {names:?}");
+    assert!(
+        graph
+            .edges
+            .iter()
+            .any(|e| e.from == "shapely" && e.to == "geometry_lib"),
+        "expected a shapely -> geometry_lib edge, got: {:?}",
+        graph
+            .edges
+            .iter()
+            .map(|e| format!("{}->{}", e.from, e.to))
+            .collect::<Vec<_>>()
+    );
+    // A target with sources must have a positive compile time.
+    for target in &graph.targets {
+        if target.source_count > 0 {
+            assert!(
+                target.duration > 0,
+                "target '{}' has sources but no duration in {}",
+                target.name,
+                dir.display()
+            );
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -377,90 +442,82 @@ fn fixture_build_dirs_report_correct_data() {
             analyzer::analyze_build_dir(dir.to_str().unwrap(), jobs, &[], false, false).unwrap();
         assert_aggregation_invariants(&analysis.strings, &analysis.result);
         assert_fixture_structure(&analysis.strings, &analysis.result);
+        assert_target_graph(dir, &analysis.result);
+        let info = build_time_insight::build_info::extract_build_info(
+            dir.to_str().expect("fixture path is valid UTF-8"),
+        );
+        assert_build_info_matches_dir(dir, &info);
     }
 }
 
 #[test]
 fn fixture_report_round_trips() {
     let dirs = fixture_build_dirs();
-    let Some(dir) = dirs.first() else {
+    if dirs.is_empty() {
         eprintln!("SKIP: no fixture build dirs found; run tests/data/cpp-project/build-traces.sh");
         return;
-    };
-    let analysis =
-        analyzer::analyze_build_dir(dir.to_str().unwrap(), 4, &[], false, false).unwrap();
+    }
 
-    // Serialize the analysis into a report, write it, and read it back.
-    let report = Report::new(
-        analysis.strings.clone(),
-        BuildInfo::default(),
-        analysis.result,
-    );
-    let path = std::env::temp_dir().join("bti_fixture_roundtrip.bin");
-    report::write_report(&report, &path).unwrap();
-    let read = report::read_report(&path).unwrap();
-    std::fs::remove_file(&path).ok();
+    for dir in &dirs {
+        let analysis =
+            analyzer::analyze_build_dir(dir.to_str().unwrap(), 4, &[], false, false).unwrap();
 
-    // The read-back report must satisfy the same invariants and structure.
-    assert_aggregation_invariants(&read.strings, &read.analysis);
-    assert_fixture_structure(&read.strings, &read.analysis);
+        // Serialize the analysis into a report, write it, and read it back.
+        let report = Report::new(
+            analysis.strings.clone(),
+            BuildInfo::default(),
+            analysis.result,
+        );
+        let path = std::env::temp_dir().join(format!(
+            "bti_fixture_roundtrip_{}.bin",
+            dir.file_name().unwrap().to_string_lossy()
+        ));
+        report::write_report(&report, &path).unwrap();
+        let read = report::read_report(&path).unwrap();
+        std::fs::remove_file(&path).ok();
+
+        // The read-back report must satisfy the same invariants and structure.
+        assert_aggregation_invariants(&read.strings, &read.analysis);
+        assert_fixture_structure(&read.strings, &read.analysis);
+        assert_target_graph(dir, &read.analysis);
+    }
 }
 
 #[test]
 fn fixture_header_usage_is_classified_correctly() {
     let dirs = fixture_build_dirs();
-    let Some(dir) = dirs
-        .first()
+    let dirs: Vec<&PathBuf> = dirs
+        .iter()
         .filter(|d| d.join("compile_commands.json").is_file())
-    else {
+        .collect();
+    if dirs.is_empty() {
         eprintln!("SKIP: no fixture build dir with compile_commands.json");
         return;
-    };
-    eprintln!(
-        "analyzing header usage in fixture build dir: {}",
-        dir.display()
-    );
-    let analysis = analyzer::analyze_build_dir(dir.to_str().unwrap(), 4, &[], true, false).unwrap();
-    assert_header_usage(&analysis.strings, &analysis.result);
+    }
+
+    dirs.par_iter().for_each(|dir| {
+        eprintln!(
+            "analyzing header usage in fixture build dir: {}",
+            dir.display()
+        );
+        // One worker per build dir; header usage spawns one compiler per unit.
+        let analysis =
+            analyzer::analyze_build_dir(dir.to_str().unwrap(), 1, &[], true, false).unwrap();
+        assert_header_usage(&analysis.strings, &analysis.result);
+    });
 }
 
 #[test]
 fn fixture_target_graph_is_correct() {
     let dirs = fixture_build_dirs();
-    let Some(dir) = dirs.first() else {
+    if dirs.is_empty() {
         eprintln!("SKIP: no fixture build dirs found");
         return;
-    };
-    let analysis =
-        analyzer::analyze_build_dir(dir.to_str().unwrap(), 4, &[], false, false).unwrap();
-    let Some(graph) = &analysis.result.targets else {
-        eprintln!("SKIP: no CMake target data in the fixture build dir");
-        return;
-    };
+    }
 
-    let names: Vec<&str> = graph.targets.iter().map(|t| t.name.as_str()).collect();
-    assert!(names.contains(&"geometry_lib"), "targets: {names:?}");
-    assert!(names.contains(&"shapely"), "targets: {names:?}");
-    assert!(
-        graph
-            .edges
-            .iter()
-            .any(|e| e.from == "shapely" && e.to == "geometry_lib"),
-        "expected a shapely -> geometry_lib edge, got: {:?}",
-        graph
-            .edges
-            .iter()
-            .map(|e| format!("{}->{}", e.from, e.to))
-            .collect::<Vec<_>>()
-    );
-    // A target with sources must have a positive compile time.
-    for target in &graph.targets {
-        if target.source_count > 0 {
-            assert!(
-                target.duration > 0,
-                "target '{}' has sources but no duration",
-                target.name
-            );
-        }
+    for dir in &dirs {
+        let analysis =
+            analyzer::analyze_build_dir(dir.to_str().unwrap(), 4, &[], false, false).unwrap();
+        assert_target_graph(dir, &analysis.result);
     }
 }
